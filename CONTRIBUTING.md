@@ -12,15 +12,15 @@ the commit history) as clean as possible.
 Since Scapy can be slow and memory consuming, we try to limit CPU and
 memory usage, particularly in parts of the code often called.
 
-## What to contribute?
+## What to contribute
 
 You want to spend time working on Scapy but have no (or little)
 idea what to do? You can look for open issues
 [labeled "contributions wanted"](https://github.com/secdev/scapy/labels/contributions%20wanted), or look at the [contributions roadmap](https://github.com/secdev/scapy/issues/399)
 
 If you have any ideas of useful contributions that you cannot (or do
-not want to) do yourself, open an issue and use the label
-"contributions wanted".
+not want to) do yourself, open an issue and include
+"contributions wanted" in the title.
 
 Once you have chosen a contribution, open an issue to let other people
 know you're working on it (or assign the existing issue to yourself)
@@ -30,11 +30,6 @@ contribution rejected after a lot of work.
 
 ## Reporting issues
 
-### Questions
-
-It is OK so submit issues to ask questions (more than OK,
-encouraged). There is a label "question" that you can use for that.
-
 ### Bugs
 
 If you have installed Scapy through a package manager (from your Linux
@@ -42,16 +37,14 @@ or BSD system, from PyPI, etc.), please get and install the current
 development code, and check that the bug still exists before
 submitting an issue.
 
-Please label your issues "bug".
-
 If you're not sure whether a behavior is a bug or not, submit an issue
 and ask, don't be shy!
 
 ### Enhancements / feature requests
 
 If you want a feature in Scapy, but cannot implement it yourself or
-want some hints on how to do that, open an issue with label
-"enhancement".
+want some hints on how to do that, open an issue and include
+"enhancement" in the title.
 
 Explain if possible the API you would like to have (e.g., give examples
 of function calls, packet creations, etc.).
@@ -60,17 +53,16 @@ of function calls, packet creations, etc.).
 
 ### Coding style & conventions
 
-First, Scapy "legacy" code contains a lot of code that do not comply
-with the following recommendations, but we try to comply with some
-guidelines for new code.
-
 -   The code should be PEP-8 compliant; you can check your code with
-    [pep8](https://pypi.python.org/pypi/pep8).
+    [pep8](https://pypi.python.org/pypi/pep8) and the command `tox -e flake8`
+
 -   [Pylint](http://www.pylint.org/) can help you write good Python
     code (even if respecting Pylint rules is sometimes either too hard
     or even undesirable; human brain needed!).
+
 -   [Google Python Style Guide](https://google.github.io/styleguide/pyguide.html)
     is a nice read!
+
 -   Avoid creating unnecessary `list` objects, particularly if they
     can be huge (e.g., when possible, use `scapy.modules.six.range()` instead of
     `range()`, `for line in fdesc` instead of `for line in
@@ -119,6 +111,31 @@ As an example, `Packet().__init__()` is called each time a **layer** is
 parsed from a string (during a network capture or a PCAP file
 read). Adding inefficient code here will have a disastrous effect on
 Scapy's performances.
+
+### Logging
+
+Scapy has an internal logging system based on `logging`.
+
+In the past, Scapy was generally too verbose on packet dissection,
+leading many new users to disable all logs, which makes it harder for them
+to find real issues afterwards. You should comply with these guidelines to
+make sure logging in Scapy remains helpful.
+
+-  If you want the log message to only be displayed when using Scapy through
+   the interactive console, use `scapy.error.log_interactive`. You are free to
+   use any log level.
+-  Otherwise, always use `scapy.error.log_runtime`.
+   -  On **packet dissection**, of *packet layers*
+      you should remain **AT OR BELOW the `logging.INFO` level**, unless the
+      issue is critical or tied to security.
+      For instance: "DNS Decompression loop detected !" is allowed as WARNING,
+      but "Could not dissect packet" or "Invalid value detected" are not.
+   -  On **packet build** or **any command** or function that is called by the
+      user or the root program, you are **free and welcomed** to use the WARNING
+      or ERROR levels, to signal that a packet was wrongly built for instance.
+-  If you are working on Scapy's core, you may use: `scapy.error.log_loading`
+   only while Scapy is loading, to display import errors for instance.
+
 
 ### Python 2 and 3 compatibility
 

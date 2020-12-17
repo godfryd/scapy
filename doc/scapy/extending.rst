@@ -22,6 +22,25 @@ This first example takes an IP or a name as first parameter, send an ICMP echo r
     if p:
         p.show()
 
+Configuring Scapy's logger
+--------------------------
+
+Scapy configures a logger automatically using Python's ``logging`` module. This
+logger is custom to support things like colors and frequency filters. By
+default, it is set to ``WARNING`` (when not in interactive mode), but you can
+change that using for instance::
+
+    import logging
+    logging.getLogger("scapy").setLevel(logging.CRITICAL)
+
+To disable almost all logs. (Scapy simply won't work properly if a CRITICAL
+failure occurs)
+
+.. note:: On interactive mode, the default log level is ``INFO``
+
+More examples
+-------------
+
 This is a more complex example which does an ARP ping and reports what it found with LaTeX formatting::
 
     #! /usr/bin/env python
@@ -57,7 +76,7 @@ Here is another tool that will constantly monitor all interfaces on a machine an
     
     sniff(prn=arp_monitor_callback, filter="arp", store=0)
 
-For a real life example, you can check `Wifitap <http://sid.rstack.org/static/articles/w/i/f/Wifitap_EN_9613.html>`_.
+For a real life example, you can check `Wifitap <http://sid.rstack.org/static/articles/w/i/f/Wifitap_EN_9613.html>`_. Sadly, Wifitap is no longer maintained but nonetheless demonstrates Scapy's Wi-Fi capabilities. The code can be retrieved from `github <https://github.com/gdssecurity/wifitap/>`_.
 
 
 Extending Scapy with add-ons
@@ -71,7 +90,8 @@ Once you've done that, you can launch Scapy and import your file, but this is st
     
     # Set log level to benefit from Scapy warnings
     import logging
-    logging.getLogger("scapy").setLevel(1)
+    logger = logging.getLogger("scapy")
+    logger.setLevel(logging.INFO)
     
     from scapy.all import *
     

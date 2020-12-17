@@ -1,5 +1,3 @@
-#! /usr/bin/env python
-
 # Copyright (C) 2018 Leonardo Monteiro <decastromonteiro@gmail.com>
 #               2017 Alexis Sultan    <alexis.sultan@sfr.com>
 #               2017 Alessio Deiana <adeiana@gmail.com>
@@ -11,20 +9,30 @@
 # scapy.contrib.description = GPRS Tunneling Protocol (GTP)
 # scapy.contrib.status = loads
 
+"""
+GPRS Tunneling Protocol (GTP)
+
+Spec: 3GPP TS 29.060 and 3GPP TS 29.274
+Some IEs: 3GPP TS 24.008
+"""
+
 from __future__ import absolute_import
 import struct
 
 
-from scapy.compat import chb, orb
+from scapy.compat import chb, orb, bytes_encode
+from scapy.config import conf
 from scapy.error import warning
 from scapy.fields import BitEnumField, BitField, ByteEnumField, ByteField, \
     ConditionalField, FieldLenField, FieldListField, FlagsField, IntField, \
     IPField, PacketListField, ShortField, StrFixedLenField, StrLenField, \
     XBitField, XByteField, XIntField
 from scapy.layers.inet import IP, UDP
-from scapy.layers.inet6 import IP6Field
+from scapy.layers.inet6 import IPv6, IP6Field
+from scapy.layers.ppp import PPP
 from scapy.modules.six.moves import range
-from scapy.packet import bind_layers, Packet, Raw
+from scapy.packet import bind_layers, bind_bottom_up, bind_top_down, \
+    Packet, Raw
 from scapy.volatile import RandInt, RandIP, RandNum, RandString
 
 
@@ -146,6 +154,7 @@ ExtensionHeadersTypes = {
     1: "Reserved",
     2: "Reserved",
     64: "UDP Port",
+    133: "PDU Session Container",
     192: "PDCP PDU Number",
     193: "Reserved",
     194: "Reserved"
@@ -166,18 +175,22 @@ class TBCDByteField(StrFixedLenField):
             if left == 0xf:
                 ret.append(TBCD_TO_ASCII[right:right + 1])
             else:
-                ret += [TBCD_TO_ASCII[right:right + 1], TBCD_TO_ASCII[left:left + 1]]  # noqa: E501
+                ret += [
+                    TBCD_TO_ASCII[right:right + 1],
+                    TBCD_TO_ASCII[left:left + 1]
+                ]
         return b"".join(ret)
 
     def i2m(self, pkt, val):
-        val = str(val)
-        ret_string = ""
+        if not isinstance(val, bytes):
+            val = bytes_encode(val)
+        ret_string = b""
         for i in range(0, len(val), 2):
             tmp = val[i:i + 2]
             if len(tmp) == 2:
-                ret_string += chr(int(tmp[1] + tmp[0], 16))
+                ret_string += chb(int(tmp[::-1], 16))
             else:
-                ret_string += chr(int("F" + tmp[0], 16))
+                ret_string += chb(int(b"F" + tmp[:1], 16))
         return ret_string
 
 
@@ -216,9 +229,16 @@ class GTPHeader(Packet):
                    ByteEnumField("gtp_type", None, GTPmessageType),
                    ShortField("length", None),
                    IntField("teid", 0),
-                   ConditionalField(XBitField("seq", 0, 16), lambda pkt:pkt.E == 1 or pkt.S == 1 or pkt.PN == 1),  # noqa: E501
-                   ConditionalField(ByteField("npdu", 0), lambda pkt:pkt.E == 1 or pkt.S == 1 or pkt.PN == 1),  # noqa: E501
-                   ConditionalField(ByteEnumField("next_ex", 0, ExtensionHeadersTypes), lambda pkt:pkt.E == 1 or pkt.S == 1 or pkt.PN == 1), ]  # noqa: E501
+                   ConditionalField(
+                       XBitField("seq", 0, 16),
+                       lambda pkt:pkt.E == 1 or pkt.S == 1 or pkt.PN == 1),
+                   ConditionalField(
+                       ByteField("npdu", 0),
+                       lambda pkt:pkt.E == 1 or pkt.S == 1 or pkt.PN == 1),
+                   ConditionalField(
+                       ByteEnumField("next_ex", 0, ExtensionHeadersTypes),
+                       lambda pkt:pkt.E == 1 or pkt.S == 1 or pkt.PN == 1),
+                   ]
 
     def post_build(self, p, pay):
         p += pay
@@ -228,11 +248,15 @@ class GTPHeader(Packet):
         return p
 
     def hashret(self):
-        return struct.pack("B", self.version) + self.payload.hashret()
+        hsh = struct.pack("B", self.version)
+        if self.seq:
+            hsh += struct.pack("H", self.seq)
+        return hsh + self.payload.hashret()
 
     def answers(self, other):
         return (isinstance(other, GTPHeader) and
                 self.version == other.version and
+                (not self.seq or self.seq == other.seq) and
                 self.payload.answers(other.payload))
 
     @classmethod
@@ -254,6 +278,24 @@ class GTP_U_Header(GTPHeader):
     # encapsulated in G-PDUs. A G-PDU is a packet including a GTP-U header and a T-PDU. The Path Protocol  # noqa: E501
     # defines the path and the GTP-U header defines the tunnel. Several tunnels may be multiplexed on a single path.  # noqa: E501
 
+    def guess_payload_class(self, payload):
+        # Snooped from Wireshark
+        # https://github.com/boundary/wireshark/blob/07eade8124fd1d5386161591b52e177ee6ea849f/epan/dissectors/packet-gtp.c#L8195  # noqa: E501
+        if self.E == 1:
+            if self.next_ex == 0x85:
+                return GTPPDUSessionContainer
+            return GTPHeader.guess_payload_class(self, payload)
+
+        if self.gtp_type == 255:
+            sub_proto = orb(payload[0])
+            if sub_proto >= 0x45 and sub_proto <= 0x4e:
+                return IP
+            elif (sub_proto & 0xf0) == 0x60:
+                return IPv6
+            else:
+                return PPP
+        return GTPHeader.guess_payload_class(self, payload)
+
 
 # Some gtp_types have to be associated with a certain type of header
 GTPforcedTypes = {
@@ -270,18 +312,97 @@ GTPforcedTypes = {
 }
 
 
+class GTPPDUSessionContainer(Packet):
+    name = "GTP PDU Session Container"
+    fields_desc = [ByteField("ExtHdrLen", None),
+                   BitField("type", 0, 4),
+                   BitField("qmp", 0, 1),
+                   ConditionalField(BitField("dlDelayInd", 0, 1),
+                                    lambda pkt: pkt.type == 1),
+                   ConditionalField(BitField("ulDelayInd", 0, 1),
+                                    lambda pkt: pkt.type == 1),
+                   ConditionalField(BitField("spareUl1", 0, 1),
+                                    lambda pkt: pkt.type == 1),
+                   ConditionalField(XBitField("spareDl1", 0, 3),
+                                    lambda pkt: pkt.type == 0),
+                   ConditionalField(BitField("P", 0, 1),
+                                    lambda pkt: pkt.type == 0),
+                   ConditionalField(BitField("R", 0, 1),
+                                    lambda pkt: pkt.type == 0),
+                   ConditionalField(XBitField("spareUl2", 0, 2),
+                                    lambda pkt: pkt.type == 1),
+                   BitField("QFI", 0, 6),
+                   ConditionalField(XBitField("PPI", 0, 3),
+                                    lambda pkt: pkt.type == 0 and
+                                    pkt.P == 1),
+                   ConditionalField(XBitField("spareDl2", 0, 5),
+                                    lambda pkt: pkt.type == 0 and
+                                    pkt.P == 1),
+                   ConditionalField(XBitField("dlSendTime", 0, 32),
+                                    lambda pkt: pkt.type == 0 and
+                                    pkt.qmp == 1),
+                   ConditionalField(XBitField("dlSendTimeRpt", 0, 32),
+                                    lambda pkt: pkt.type == 1 and
+                                    pkt.qmp == 1),
+                   ConditionalField(XBitField("dlRecvTime", 0, 32),
+                                    lambda pkt: pkt.type == 1 and
+                                    pkt.qmp == 1),
+                   ConditionalField(XBitField("ulSendTime", 0, 32),
+                                    lambda pkt: pkt.type == 1 and
+                                    pkt.qmp == 1),
+                   ConditionalField(XBitField("dlDelayRslt", 0, 32),
+                                    lambda pkt: pkt.type == 1 and
+                                    pkt.dlDelayInd == 1),
+                   ConditionalField(XBitField("ulDelayRslt", 0, 32),
+                                    lambda pkt: pkt.type == 1 and
+                                    pkt.ulDelayInd == 1),
+                   ByteEnumField("NextExtHdr", 0, ExtensionHeadersTypes),
+                   ConditionalField(StrLenField(
+                       "extraPadding",
+                       "",
+                       length_from=lambda pkt: 4 * (pkt.ExtHdrLen) - 5),
+                       lambda pkt:pkt.ExtHdrLen and pkt.ExtHdrLen > 1 and
+                       pkt.type == 0 and pkt.P == 1 and pkt.NextExtHdr == 0)]
+
+    def guess_payload_class(self, payload):
+        if self.NextExtHdr == 0:
+            sub_proto = orb(payload[0])
+            if sub_proto >= 0x45 and sub_proto <= 0x4e:
+                return IP
+            elif (sub_proto & 0xf0) == 0x60:
+                return IPv6
+            else:
+                return PPP
+        return GTPHeader.guess_payload_class(self, payload)
+
+    def post_build(self, p, pay):
+        p += pay
+        if self.ExtHdrLen is None:
+            if self.P == 1:
+                hdr_len = 2
+            else:
+                hdr_len = 1
+            p = struct.pack("!B", hdr_len) + p[1:]
+        return p
+
+
 class GTPEchoRequest(Packet):
     # 3GPP TS 29.060 V9.1.0 (2009-12)
     name = "GTP Echo Request"
 
-    def hashret(self):
-        return struct.pack("H", self.seq)
-
 
 class IE_Base(Packet):
-
     def extract_padding(self, pkt):
         return "", pkt
+
+    def post_build(self, p, pay):
+        if self.fields_desc[1].name == "length":
+            if self.length is None:
+                tmp_len = len(p)
+                if isinstance(self.payload, conf.padding_layer):
+                    tmp_len += len(self.payload.load)
+                p = p[:1] + struct.pack("!H", tmp_len - 2) + p[3:]
+        return p + pay
 
 
 class IE_Cause(IE_Base):
@@ -431,7 +552,9 @@ class APNStrLenField(StrLenField):
         return s
 
     def i2m(self, pkt, s):
-        s = b"".join(chb(len(x)) + x for x in s.split("."))
+        if not isinstance(s, bytes):
+            s = bytes_encode(s)
+        s = b"".join(chb(len(x)) + x for x in s.split(b"."))
         return s
 
 
@@ -460,8 +583,17 @@ class IE_ProtocolConfigurationOptions(IE_Base):
 class IE_GSNAddress(IE_Base):
     name = "GSN Address"
     fields_desc = [ByteEnumField("ietype", 133, IEType),
-                   ShortField("length", 4),
-                   IPField("address", RandIP())]
+                   ShortField("length", None),
+                   ConditionalField(IPField("ipv4_address", RandIP()),
+                                    lambda pkt: pkt.length == 4),
+                   ConditionalField(IP6Field("ipv6_address", '::1'),
+                                    lambda pkt: pkt.length == 16)]
+
+    def post_build(self, p, pay):
+        if self.length is None:
+            tmp_len = len(p) - 3
+            p = p[:2] + struct.pack("!B", tmp_len) + p[3:]
+        return p
 
 
 class IE_MSInternationalNumber(IE_Base):
@@ -474,15 +606,16 @@ class IE_MSInternationalNumber(IE_Base):
 
 class QoS_Profile(IE_Base):
     name = "QoS profile"
+    # 3GPP TS 24.008 10.5.6.5
     fields_desc = [ByteField("qos_ei", 0),
                    ByteField("length", None),
-                   XBitField("spare", 0x00, 2),
+                   XBitField("spare1", 0x00, 2),
                    XBitField("delay_class", 0x000, 3),
                    XBitField("reliability_class", 0x000, 3),
                    XBitField("peak_troughput", 0x0000, 4),
-                   BitField("spare", 0, 1),
+                   BitField("spare2", 0, 1),
                    XBitField("precedence_class", 0x000, 3),
-                   XBitField("spare", 0x000, 3),
+                   XBitField("spare3", 0x000, 3),
                    XBitField("mean_troughput", 0x00000, 5),
                    XBitField("traffic_class", 0x000, 3),
                    XBitField("delivery_order", 0x00, 2),
@@ -503,84 +636,84 @@ class IE_QoS(IE_Base):
     fields_desc = [ByteEnumField("ietype", 135, IEType),
                    ShortField("length", None),
                    ByteField("allocation_retention_prioiry", 1),
-
-                   ConditionalField(XBitField("spare", 0x00, 2),
-                                    lambda pkt: pkt.length > 1),
+                   # 3GPP TS 24.008 10.5.6.5
+                   ConditionalField(XBitField("spare1", 0x00, 2),
+                                    lambda p: p.length and p.length > 1),
                    ConditionalField(XBitField("delay_class", 0x000, 3),
-                                    lambda pkt: pkt.length > 1),
+                                    lambda p: p.length and p.length > 1),
                    ConditionalField(XBitField("reliability_class", 0x000, 3),
-                                    lambda pkt: pkt.length > 1),
+                                    lambda p: p.length and p.length > 1),
 
                    ConditionalField(XBitField("peak_troughput", 0x0000, 4),
-                                    lambda pkt: pkt.length > 2),
-                   ConditionalField(BitField("spare", 0, 1),
-                                    lambda pkt: pkt.length > 2),
+                                    lambda p: p.length and p.length > 2),
+                   ConditionalField(BitField("spare2", 0, 1),
+                                    lambda p: p.length and p.length > 2),
                    ConditionalField(XBitField("precedence_class", 0x000, 3),
-                                    lambda pkt: pkt.length > 2),
+                                    lambda p: p.length and p.length > 2),
 
-                   ConditionalField(XBitField("spare", 0x000, 3),
-                                    lambda pkt: pkt.length > 3),
+                   ConditionalField(XBitField("spare3", 0x000, 3),
+                                    lambda p: p.length and p.length > 3),
                    ConditionalField(XBitField("mean_troughput", 0x00000, 5),
-                                    lambda pkt: pkt.length > 3),
+                                    lambda p: p.length and p.length > 3),
 
                    ConditionalField(XBitField("traffic_class", 0x000, 3),
-                                    lambda pkt: pkt.length > 4),
+                                    lambda p: p.length and p.length > 4),
                    ConditionalField(XBitField("delivery_order", 0x00, 2),
-                                    lambda pkt: pkt.length > 4),
+                                    lambda p: p.length and p.length > 4),
                    ConditionalField(XBitField("delivery_of_err_sdu", 0x000, 3),
-                                    lambda pkt: pkt.length > 4),
+                                    lambda p: p.length and p.length > 4),
 
                    ConditionalField(ByteField("max_sdu_size", None),
-                                    lambda pkt: pkt.length > 5),
+                                    lambda p: p.length and p.length > 5),
                    ConditionalField(ByteField("max_bitrate_up", None),
-                                    lambda pkt: pkt.length > 6),
+                                    lambda p: p.length and p.length > 6),
                    ConditionalField(ByteField("max_bitrate_down", None),
-                                    lambda pkt: pkt.length > 7),
+                                    lambda p: p.length and p.length > 7),
 
                    ConditionalField(XBitField("redidual_ber", 0x0000, 4),
-                                    lambda pkt: pkt.length > 8),
+                                    lambda p: p.length and p.length > 8),
                    ConditionalField(XBitField("sdu_err_ratio", 0x0000, 4),
-                                    lambda pkt: pkt.length > 8),
+                                    lambda p: p.length and p.length > 8),
                    ConditionalField(XBitField("transfer_delay", 0x00000, 6),
-                                    lambda pkt: pkt.length > 9),
+                                    lambda p: p.length and p.length > 9),
                    ConditionalField(XBitField("traffic_handling_prio",
                                               0x000,
                                               2),
-                                    lambda pkt: pkt.length > 9),
+                                    lambda p: p.length and p.length > 9),
 
                    ConditionalField(ByteField("guaranteed_bit_rate_up", None),
-                                    lambda pkt: pkt.length > 10),
+                                    lambda p: p.length and p.length > 10),
                    ConditionalField(ByteField("guaranteed_bit_rate_down",
                                               None),
-                                    lambda pkt: pkt.length > 11),
+                                    lambda p: p.length and p.length > 11),
 
-                   ConditionalField(XBitField("spare", 0x000, 3),
-                                    lambda pkt: pkt.length > 12),
+                   ConditionalField(XBitField("spare4", 0x000, 3),
+                                    lambda p: p.length and p.length > 12),
                    ConditionalField(BitField("signaling_indication", 0, 1),
-                                    lambda pkt: pkt.length > 12),
+                                    lambda p: p.length and p.length > 12),
                    ConditionalField(XBitField("source_stats_desc", 0x0000, 4),
-                                    lambda pkt: pkt.length > 12),
+                                    lambda p: p.length and p.length > 12),
 
                    ConditionalField(ByteField("max_bitrate_down_ext", None),
-                                    lambda pkt: pkt.length > 13),
+                                    lambda p: p.length and p.length > 13),
                    ConditionalField(ByteField("guaranteed_bitrate_down_ext",
                                               None),
-                                    lambda pkt: pkt.length > 14),
+                                    lambda p: p.length and p.length > 14),
                    ConditionalField(ByteField("max_bitrate_up_ext", None),
-                                    lambda pkt: pkt.length > 15),
+                                    lambda p: p.length and p.length > 15),
                    ConditionalField(ByteField("guaranteed_bitrate_up_ext",
                                               None),
-                                    lambda pkt: pkt.length > 16),
+                                    lambda p: p.length and p.length > 16),
                    ConditionalField(ByteField("max_bitrate_down_ext2", None),
-                                    lambda pkt: pkt.length > 17),
+                                    lambda p: p.length and p.length > 17),
                    ConditionalField(ByteField("guaranteed_bitrate_down_ext2",
                                               None),
-                                    lambda pkt: pkt.length > 18),
+                                    lambda p: p.length and p.length > 18),
                    ConditionalField(ByteField("max_bitrate_up_ext2", None),
-                                    lambda pkt: pkt.length > 19),
+                                    lambda p: p.length and p.length > 19),
                    ConditionalField(ByteField("guaranteed_bitrate_up_ext2",
                                               None),
-                                    lambda pkt: pkt.length > 20)]
+                                    lambda p: p.length and p.length > 20)]
 
 
 class IE_CommonFlags(IE_Base):
@@ -629,12 +762,7 @@ class IE_MSTimeZone(IE_Base):
     fields_desc = [ByteEnumField("ietype", 153, IEType),
                    ShortField("length", None),
                    ByteField("timezone", 0),
-                   BitField("Spare", 0, 1),
-                   BitField("Spare", 0, 1),
-                   BitField("Spare", 0, 1),
-                   BitField("Spare", 0, 1),
-                   BitField("Spare", 0, 1),
-                   BitField("Spare", 0, 1),
+                   BitField("spare", 0, 6),
                    XBitField("daylight_saving_time", 0x00, 2)]
 
 
@@ -654,13 +782,10 @@ class IE_MSInfoChangeReportingAction(IE_Base):
 
 class IE_DirectTunnelFlags(IE_Base):
     name = "Direct Tunnel Flags"
+    # 29.060 7.7.81
     fields_desc = [ByteEnumField("ietype", 182, IEType),
                    ShortField("length", 1),
-                   BitField("Spare", 0, 1),
-                   BitField("Spare", 0, 1),
-                   BitField("Spare", 0, 1),
-                   BitField("Spare", 0, 1),
-                   BitField("Spare", 0, 1),
+                   BitField("spare", 0, 5),
                    BitField("EI", 0, 1),
                    BitField("GCSI", 0, 1),
                    BitField("DTI", 0, 1)]
@@ -675,12 +800,13 @@ class IE_BearerControlMode(IE_Base):
 
 class IE_EvolvedAllocationRetentionPriority(IE_Base):
     name = "Evolved Allocation/Retention Priority"
+    # 29.060 7.7.91
     fields_desc = [ByteEnumField("ietype", 191, IEType),
                    ShortField("length", 1),
-                   BitField("Spare", 0, 1),
+                   BitField("spare1", 0, 1),
                    BitField("PCI", 0, 1),
                    XBitField("PL", 0x0000, 4),
-                   BitField("Spare", 0, 1),
+                   BitField("spare2", 0, 1),
                    BitField("PVI", 0, 1)]
 
 
@@ -775,23 +901,17 @@ class GTPEchoResponse(Packet):
     name = "GTP Echo Response"
     fields_desc = [PacketListField("IE_list", [], IE_Dispatcher)]
 
-    def hashret(self):
-        return struct.pack("H", self.seq)
-
     def answers(self, other):
-        return self.seq == other.seq
+        return isinstance(other, GTPEchoRequest)
 
 
 class GTPCreatePDPContextRequest(Packet):
     # 3GPP TS 29.060 V9.1.0 (2009-12)
     name = "GTP Create PDP Context Request"
-    fields_desc = [PacketListField("IE_list", [IE_TEIDI(), IE_NSAPI(), IE_GSNAddress(),  # noqa: E501
-                                               IE_GSNAddress(),
+    fields_desc = [PacketListField("IE_list", [IE_TEIDI(), IE_NSAPI(), IE_GSNAddress(length=4, ipv4_address=RandIP()),  # noqa: E501
+                                               IE_GSNAddress(length=4, ipv4_address=RandIP()),  # noqa: E501
                                                IE_NotImplementedTLV(ietype=135, length=15, data=RandString(15))],  # noqa: E501
                                    IE_Dispatcher)]
-
-    def hashret(self):
-        return struct.pack("H", self.seq)
 
 
 class GTPCreatePDPContextResponse(Packet):
@@ -799,11 +919,8 @@ class GTPCreatePDPContextResponse(Packet):
     name = "GTP Create PDP Context Response"
     fields_desc = [PacketListField("IE_list", [], IE_Dispatcher)]
 
-    def hashret(self):
-        return struct.pack("H", self.seq)
-
     def answers(self, other):
-        return self.seq == other.seq
+        return isinstance(other, GTPCreatePDPContextRequest)
 
 
 class GTPUpdatePDPContextRequest(Packet):
@@ -831,17 +948,14 @@ class GTPUpdatePDPContextRequest(Packet):
         IE_PrivateExtension()],
         IE_Dispatcher)]
 
-    def hashret(self):
-        return struct.pack("H", self.seq)
-
 
 class GTPUpdatePDPContextResponse(Packet):
     # 3GPP TS 29.060 V9.1.0 (2009-12)
     name = "GTP Update PDP Context Response"
     fields_desc = [PacketListField("IE_list", None, IE_Dispatcher)]
 
-    def hashret(self):
-        return struct.pack("H", self.seq)
+    def answers(self, other):
+        return isinstance(other, GTPUpdatePDPContextRequest)
 
 
 class GTPErrorIndication(Packet):
@@ -869,7 +983,7 @@ class GTPPDUNotificationRequest(Packet):
                                                IE_TEICP(TEICI=RandInt()),
                                                IE_EndUserAddress(PDPTypeNumber=0x21),  # noqa: E501
                                                IE_AccessPointName(),
-                                               IE_GSNAddress(address="127.0.0.1"),  # noqa: E501
+                                               IE_GSNAddress(ipv4_address="127.0.0.1"),  # noqa: E501
                                                ], IE_Dispatcher)]
 
 
@@ -887,8 +1001,9 @@ class GTPmorethan1500(Packet):
 
 
 # Bind GTP-C
-bind_layers(UDP, GTPHeader, dport=2123)
-bind_layers(UDP, GTPHeader, sport=2123)
+bind_bottom_up(UDP, GTPHeader, dport=2123)
+bind_bottom_up(UDP, GTPHeader, sport=2123)
+bind_layers(UDP, GTPHeader, dport=2123, sport=2123)
 bind_layers(GTPHeader, GTPEchoRequest, gtp_type=1, S=1)
 bind_layers(GTPHeader, GTPEchoResponse, gtp_type=2, S=1)
 bind_layers(GTPHeader, GTPCreatePDPContextRequest, gtp_type=16)
@@ -903,7 +1018,12 @@ bind_layers(GTPHeader, GTP_UDPPort_ExtensionHeader, next_ex=64, E=1)
 bind_layers(GTPHeader, GTP_PDCP_PDU_ExtensionHeader, next_ex=192, E=1)
 
 # Bind GTP-U
-bind_layers(UDP, GTP_U_Header, dport=2152)
-bind_layers(UDP, GTP_U_Header, sport=2152)
+bind_bottom_up(UDP, GTP_U_Header, dport=2152)
+bind_bottom_up(UDP, GTP_U_Header, sport=2152)
+bind_layers(UDP, GTP_U_Header, dport=2152, sport=2152)
 bind_layers(GTP_U_Header, GTPErrorIndication, gtp_type=26, S=1)
-bind_layers(GTP_U_Header, IP, gtp_type=255)
+bind_layers(GTP_U_Header, GTPPDUSessionContainer,
+            gtp_type=255, E=1, next_ex=0x85)
+bind_top_down(GTP_U_Header, IP, gtp_type=255)
+bind_top_down(GTP_U_Header, IPv6, gtp_type=255)
+bind_top_down(GTP_U_Header, PPP, gtp_type=255)

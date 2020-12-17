@@ -15,7 +15,7 @@ import os
 import socket
 import random
 
-from scapy.data import KnowledgeBase
+from scapy.data import KnowledgeBase, select_path
 from scapy.config import conf
 from scapy.compat import raw
 from scapy.layers.inet import IP, TCP, TCPOptions
@@ -29,10 +29,12 @@ if conf.route is None:
     # unused import, only to initialize conf.route
     import scapy.route  # noqa: F401
 
-conf.p0f_base = "/etc/p0f/p0f.fp"
-conf.p0fa_base = "/etc/p0f/p0fa.fp"
-conf.p0fr_base = "/etc/p0f/p0fr.fp"
-conf.p0fo_base = "/etc/p0f/p0fo.fp"
+_p0fpaths = ["/etc/p0f", "/usr/share/p0f", "/opt/local"]
+
+conf.p0f_base = select_path(_p0fpaths, "p0f.fp")
+conf.p0fa_base = select_path(_p0fpaths, "p0fa.fp")
+conf.p0fr_base = select_path(_p0fpaths, "p0fr.fp")
+conf.p0fo_base = select_path(_p0fpaths, "p0fo.fp")
 
 
 ###############
@@ -504,7 +506,7 @@ Some specifications of the p0f.fp file are not (yet) implemented."""
                     options.append((int(opt[1:]), ''))
             # FIXME: qqP not handled
             else:
-                warning("unhandled TCP option " + opt)
+                warning("unhandled TCP option %s", opt)
             pkt.payload.options = options
 
     # window size

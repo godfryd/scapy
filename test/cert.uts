@@ -69,9 +69,9 @@ z.pubkey.public_numbers().x == 1047486561747694969523700054215665182527042630001
 
 = PubKeyRSA class : Generate without modulus
 t = PubKeyRSA()
-t.fill_and_store(modulus=None, pubExp=32769, modulusLen=1024)
+t.fill_and_store(modulus=None, pubExp=65537, modulusLen=1024)
 assert t.pubkey.key_size == 1024
-assert t.pubkey.public_numbers().e == 32769
+assert t.pubkey.public_numbers().e == 65537
 
 ########### PrivKey class ###############################################
 
@@ -133,6 +133,7 @@ weDU+RsFxcyU/QxD9WYORzYarqxbcA==
 type(y) is PrivKeyECDSA
 
 = PrivKeyECDSA sign & verify
+~ crypto_advanced
 a = PrivKeyECDSA()
 a.fill_and_store()
 msg = b"Scapy test message"
@@ -141,6 +142,7 @@ assert a.verify(msg, data)
 assert not a.verify(b"Hello", data)
 
 = PubKeyECDSA verify
+~ crypto_advanced
 b = PubKeyECDSA()
 b.pubkey = a.pubkey
 assert b.verify(msg, data)
@@ -325,6 +327,23 @@ assert(x.cA)
 assert(x.authorityKeyID == b'\xf3\xd8N\xde\x90\xf7\xe6]\xd2\xce3\xcd\\V\x8co\x97\x141K')
 not hasattr(x, "keyUsage")
 
+= Cert class : encrypt
+
+assert len(x.encrypt(b"Scapy")) == 256
+
+= Cert class : export
+
+import tempfile, os
+filename = tempfile.mktemp()
+x.export(filename)
+fstat = os.stat(filename)
+assert fstat.st_size == 1302
+os.remove(filename)
+
+= Cert class : isIssuerCert
+
+assert x.isIssuerCert(x)
+
 = Cert class : Importing another PEM-encoded X.509 Certificate
 y = Cert("""
 -----BEGIN CERTIFICATE-----
@@ -364,6 +383,22 @@ Validity: Aug 01 12:00:00 2013 GMT to Jan 15 12:00:00 2038 GMT
 with ContextManagerCaptureOutput() as cmco:
     y.show()
     assert cmco.get_output().strip() == awaited.strip()
+
+= Cert: Check split_pem on chained certs with missing end \n
+from scapy.layers.tls.cert import split_pem
+ks = split_pem(b"""
+-----BEGIN EC PRIVATE KEY-----
+MHQCAQEEIMiRlFoy6046m1NXu911ukXyjDLVgmOXWCKWdQMd8gCRoAcGBSuBBAAK
+oUQDQgAE55WjbZjS/88K1kYagsO9wtKifw0IKLp4Jd5qtmDF2Zu+xrwrBRT0HBnP
+weDU+RsFxcyU/QxD9WYORzYarqxbcA==
+-----END EC PRIVATE KEY-----
+-----BEGIN EC PRIVATE KEY-----
+MHQCAQEEIMiRlFoy6046m1NXu911ukXyjDLVgmOXWCKWdQMd8gCRoAcGBSuBBAAK
+oUQDQgAE55WjbZjS/88K1kYagsO9wtKifw0IKLp4Jd5qtmDF2Zu+xrwrBRT0HBnP
+weDU+RsFxcyU/QxD9WYORzYarqxbcA==
+-----END EC PRIVATE KEY-----""")
+assert ks[0][:-1] == ks[1]
+
 
 ########### CRL class ###############################################
 
@@ -529,6 +564,13 @@ c2.pubKey.verifyCert(c2) and c1.pubKey.verifyCert(c0)
 assert(len(Chain([c0, c1, c2])) == 3)
 assert(len(Chain([c0], c1)) == 2)
 len(Chain([c0], c2)) == 1
+
+= Chain class : repr
+
+expected_repr = """__ /C=US/ST=Arizona/L=Scottsdale/O=Starfield Technologies, Inc./CN=Starfield Root Certificate Authority - G2 [Self Signed]
+  _ /C=US/ST=Arizona/L=Scottsdale/O=Starfield Technologies, Inc./OU=http://certs.starfieldtech.com/repository//CN=Starfield Secure Certificate Authority - G2
+    _ /OU=Domain Control Validated/CN=*.tools.ietf.org"""
+assert str(Chain([c0, c1, c2])) == expected_repr
 
 = Chain class : Checking chain verification
 assert(Chain([], c0).verifyChain([c2], [c1]))

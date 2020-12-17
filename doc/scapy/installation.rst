@@ -18,7 +18,12 @@ Each of these steps can be done in a different way depending on your platform an
 Scapy versions
 ==============
 
-.. image:: graphics/scapy_version_timeline.jpg
+.. raw:: html
+
+   <div id="table_div" style="text-align:center;"></div>
+   <script type="text/javascript" src="https://www.gstatic.com/charts/loader.js"></script>
+   <script type="text/javascript" src="https://scapy.net/assets/js/scapy_versions.js"></script>
+   <br />
 
 .. note::
 
@@ -129,7 +134,7 @@ Here are the topics involved and some examples that you can use to try if your i
  
   .. code-block:: python
 
-    >>> p=readpcap("myfile.pcap")
+    >>> p=rdpcap("myfile.pcap")
     >>> p.conversations(type="jpg", target="> test.jpg")
 
   .. note::
@@ -179,10 +184,15 @@ Here are the topics involved and some examples that you can use to try if your i
 Platform-specific instructions
 ==============================
 
+As a general rule, you can toggle the **libpcap** integration `on` or `off` at any time, using::
+
+    from scapy.config import conf
+    conf.use_pcap = True
+
 Linux native
 ------------
 
-Scapy can run natively on Linux, without libdnet and libpcap.
+Scapy can run natively on Linux, without libpcap.
 
 * Install `Python 2.7 or 3.4+ <http://www.python.org>`_.
 * Install `tcpdump <http://www.tcpdump.org>`_ and make sure it is in the $PATH. (It's only used to compile BPF filters (``-ddd option``))
@@ -213,11 +223,14 @@ All dependencies may be installed either via the platform-specific installer, or
 Mac OS X
 --------
 
-On Mac OS X, Scapy does not work natively. You need to install Python bindings
-to use libdnet and libpcap. You can choose to install using either Homebrew or
-MacPorts. They both work fine, yet Homebrew is used to run unit tests with
+On Mac OS X, Scapy **DOES work natively** since the recent versions.
+However, you may want to make Scapy use libpcap.
+You can choose to install it using either Homebrew or MacPorts. They both
+work fine, yet Homebrew is used to run unit tests with
 `Travis CI <https://travis-ci.org>`_. 
 
+.. note:: 
+    Libpcap might already be installed on your platform (for instance, if you have tcpdump). This is the case of `OSX <https://developer.apple.com/library/archive/documentation/System/Conceptual/ManPages_iPhoneOS/man3/pcap.3.html>`_
 
 Install using Homebrew
 ^^^^^^^^^^^^^^^^^^^^^^
@@ -226,13 +239,13 @@ Install using Homebrew
 
    $ brew update
 
-2. Install Python bindings::
+2. Install libpcap::
 
-   $ brew install --with-python libdnet
-   $ brew install https://raw.githubusercontent.com/secdev/scapy/master/.travis/pylibpcap.rb
-   $ sudo brew install --with-python libdnet
-   $ sudo brew install https://raw.githubusercontent.com/secdev/scapy/master/.travis/pylibpcap.rb
+   $ brew install libpcap
 
+Enable it In Scapy::
+
+    conf.use_pcap = True
 
 Install using MacPorts
 ^^^^^^^^^^^^^^^^^^^^^^
@@ -241,28 +254,34 @@ Install using MacPorts
 
    $ sudo port -d selfupdate
 
-2. Install Python bindings::
+2. Install libpcap::
 
-   $ sudo port install py-libdnet py-pylibpcap
+   $ sudo port install libpcap
 
+Enable it In Scapy::
+
+    conf.use_pcap = True
 
 OpenBSD
 -------
 
-In a similar manner, to install Scapy on OpenBSD 5.9+, you will need to install the libpcap/libdnet bindings:
+In a similar manner, to install Scapy on OpenBSD 5.9+, you **may** want to install libpcap, if you do not want to use the native extension:
 
 .. code-block:: text
 
-	$ doas pkg_add py-libpcap py-libdnet tcpdump
-
-An OpenBSD install may be lacking the ``/etc/ethertypes`` file. You may install it with
-
-.. code-block:: text
-
- # wget http://git.netfilter.org/ebtables/plain/ethertypes -O /etc/ethertypes
+	$ doas pkg_add libpcap tcpdump
 
 Then install Scapy via ``pip`` or ``pkg_add`` (bundled under ``python-scapy``)
 All dependencies may be installed either via the platform-specific installer, or via PyPI. See `Optional Dependencies <#optional-dependencies>`_ for more information.
+
+SunOS / Solaris
+---------------
+
+Solaris / SunOS requires ``libpcap`` (installed by default) to work.
+
+.. note::
+    In fact, Solaris doesn't support `AF_PACKET`, which Scapy uses on Linux, but rather uses its own system `DLPI`. See `this page <https://www.oracle.com/technetwork/server-storage/solaris/solaris-linux-app-139382.html>`_.
+    We prefer using the very universal `libpcap` that spending time implementing support for `DLPI`.
 
 .. _windows_installation:
 

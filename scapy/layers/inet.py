@@ -13,12 +13,13 @@ import time
 import struct
 import re
 import random
+import select
 import socket
-from select import select
 from collections import defaultdict
 
 from scapy.utils import checksum, do_graph, incremental_label, \
     linehexdump, strxor, whois, colgen
+from scapy.ansmachine import AnsweringMachine
 from scapy.base_classes import Gen, Net
 from scapy.data import ETH_P_IP, ETH_P_ALL, DLT_RAW, DLT_RAW_ALT, DLT_IPV4, \
     IP_PROTOS, TCP_SERVICES, UDP_SERVICES
@@ -28,17 +29,37 @@ from scapy.compat import raw, chb, orb, bytes_encode
 from scapy.config import conf
 from scapy.extlib import plt, MATPLOTLIB, MATPLOTLIB_INLINED, \
     MATPLOTLIB_DEFAULT_PLOT_KARGS
-from scapy.fields import ConditionalField, IPField, BitField, BitEnumField, \
-    FieldLenField, StrLenField, ByteField, ShortField, ByteEnumField, \
-    DestField, FieldListField, FlagsField, IntField, MultiEnumField, \
-    PacketListField, ShortEnumField, SourceIPField, StrField, \
-    StrFixedLenField, XByteField, XShortField, Emph
-from scapy.packet import Packet, bind_layers, NoPayload
+from scapy.fields import (
+    BitEnumField,
+    BitField,
+    ByteEnumField,
+    ByteField,
+    ConditionalField,
+    DestField,
+    Emph,
+    FieldLenField,
+    FieldListField,
+    FlagsField,
+    IPField,
+    IntField,
+    MultiEnumField,
+    MultipleTypeField,
+    PacketListField,
+    ShortEnumField,
+    ShortField,
+    SourceIPField,
+    StrField,
+    StrFixedLenField,
+    StrLenField,
+    XByteField,
+    XShortField,
+)
+from scapy.packet import Packet, bind_layers, bind_bottom_up, NoPayload
 from scapy.volatile import RandShort, RandInt, RandBin, RandNum, VolatileValue
 from scapy.sendrecv import sr, sr1
-from scapy.plist import PacketList, SndRcvList
+from scapy.plist import _PacketList, PacketList, SndRcvList
 from scapy.automaton import Automaton, ATMT
-from scapy.error import warning
+from scapy.error import log_runtime, warning
 from scapy.pton_ntop import inet_pton
 
 import scapy.as_resolvers
@@ -216,6 +237,28 @@ class IPOption_Traceroute(IPOption):
                    IPField("originator_ip", "0.0.0.0")]
 
 
+class IPOption_Timestamp(IPOption):
+    name = "IP Option Timestamp"
+    optclass = 2
+    option = 4
+    fields_desc = [_IPOption_HDR,
+                   ByteField("length", None),
+                   ByteField("pointer", 9),
+                   BitField("oflw", 0, 4),
+                   BitEnumField("flg", 1, 4,
+                                {0: "timestamp_only",
+                                 1: "timestamp_and_ip_addr",
+                                 3: "prespecified_ip_addr"}),
+                   ConditionalField(IPField("internet_address", "0.0.0.0"),
+                                    lambda pkt: pkt.flg != 0),
+                   IntField('timestamp', 0)]
+
+    def post_build(self, p, pay):
+        if self.length is None:
+            p = p[:1] + struct.pack("!B", len(p)) + p[2:]
+        return p + pay
+
+
 class IPOption_Address_Extension(IPOption):
     name = "IP Option Address Extension"
     copy_flag = 1
@@ -324,7 +367,9 @@ class TCPOptionsField(StrField):
     def getfield(self, pkt, s):
         opsz = (pkt.dataofs - 5) * 4
         if opsz < 0:
-            warning("bad dataofs (%i). Assuming dataofs=5" % pkt.dataofs)
+            log_runtime.info(
+                "bad dataofs (%i). Assuming dataofs=5", pkt.dataofs
+            )
             opsz = 0
         return s[opsz:], self.m2i(pkt, s[:opsz])
 
@@ -334,15 +379,19 @@ class TCPOptionsField(StrField):
             onum = orb(x[0])
             if onum == 0:
                 opt.append(("EOL", None))
-                x = x[1:]
                 break
             if onum == 1:
                 opt.append(("NOP", None))
                 x = x[1:]
                 continue
-            olen = orb(x[1])
+            try:
+                olen = orb(x[1])
+            except IndexError:
+                olen = 0
             if olen < 2:
-                warning("Malformed TCP option (announced length is %i)" % olen)
+                log_runtime.info(
+                    "Malformed TCP option (announced length is %i)", olen
+                )
                 olen = 2
             oval = x[2:olen]
             if onum in TCPOptions[0]:
@@ -387,7 +436,7 @@ class TCPOptionsField(StrField):
                             oval = (oval,)
                         oval = struct.pack(ofmt, *oval)
                 else:
-                    warning("option [%s] unknown. Skipped.", oname)
+                    warning("Option [%s] unknown. Skipped.", oname)
                     continue
             else:
                 onum = oname
@@ -395,7 +444,7 @@ class TCPOptionsField(StrField):
                     warning("Invalid option number [%i]" % onum)
                     continue
                 if not isinstance(oval, (bytes, str)):
-                    warning("option [%i] is not bytes." % onum)
+                    warning("Option [%i] is not bytes." % onum)
                     continue
             if isinstance(oval, str):
                 oval = bytes_encode(oval)
@@ -422,7 +471,7 @@ class ICMPTimeStampField(IntField):
         if isinstance(val, str):
             hmsms = self.re_hmsm.match(val)
             if hmsms:
-                h, _, m, _, s, _, ms = hmsms = hmsms.groups()
+                h, _, m, _, s, _, ms = hmsms.groups()
                 ms = int(((ms or "") + "000")[:3])
                 val = ((int(h) * 60 + int(m or 0)) * 60 + int(s or 0)) * 1000 + ms  # noqa: E501
             else:
@@ -549,7 +598,8 @@ class IP(Packet, IPTools):
 
     def fragment(self, fragsize=1480):
         """Fragment IP datagrams"""
-        fragsize = (fragsize + 7) // 8 * 8
+        lastfragsz = fragsize
+        fragsize -= fragsize % 8
         lst = []
         fnb = 0
         fl = self
@@ -559,7 +609,11 @@ class IP(Packet, IPTools):
 
         for p in fl:
             s = raw(p[fnb].payload)
-            nb = (len(s) + fragsize - 1) // fragsize
+            if len(s) <= lastfragsz:
+                lst.append(p)
+                continue
+
+            nb = (len(s) - lastfragsz + fragsize - 1) // fragsize + 1
             for i in range(nb):
                 q = p.copy()
                 del(q[fnb].payload)
@@ -567,8 +621,11 @@ class IP(Packet, IPTools):
                 del(q[fnb].len)
                 if i != nb - 1:
                     q[fnb].flags |= 1
+                    fragend = (i + 1) * fragsize
+                else:
+                    fragend = i * fragsize + lastfragsz
                 q[fnb].frag += i * fragsize // 8
-                r = conf.raw_layer(load=s[i * fragsize:(i + 1) * fragsize])
+                r = conf.raw_layer(load=s[i * fragsize:fragend])
                 r.overload_fields = p[fnb].payload.overload_fields.copy()
                 q.add_payload(r)
                 lst.append(q)
@@ -622,8 +679,10 @@ class TCP(Packet):
         p += pay
         dataofs = self.dataofs
         if dataofs is None:
-            dataofs = 5 + ((len(self.get_field("options").i2m(self, self.options)) + 3) // 4)  # noqa: E501
-            p = p[:12] + chb((dataofs << 4) | orb(p[12]) & 0x0f) + p[13:]
+            opt_len = len(self.get_field("options").i2m(self, self.options))
+            dataofs = 5 + ((opt_len + 3) // 4)
+            dataofs = (dataofs << 4) | orb(p[12]) & 0x0f
+            p = p[:12] + chb(dataofs & 0xff) + p[13:]
         if self.chksum is None:
             if isinstance(self.underlayer, IP):
                 ck = in4_chksum(socket.IPPROTO_TCP, self.underlayer, p)
@@ -632,7 +691,9 @@ class TCP(Packet):
                 ck = scapy.layers.inet6.in6_chksum(socket.IPPROTO_TCP, self.underlayer, p)  # noqa: E501
                 p = p[:16] + struct.pack("!H", ck) + p[18:]
             else:
-                warning("No IP underlayer to compute checksum. Leaving null.")
+                log_runtime.info(
+                    "No IP underlayer to compute checksum. Leaving null."
+                )
         return p
 
     def hashret(self):
@@ -708,7 +769,9 @@ class UDP(Packet):
                     ck = 0xFFFF
                 p = p[:6] + struct.pack("!H", ck) + p[8:]
             else:
-                warning("No IP underlayer to compute checksum. Leaving null.")
+                log_runtime.info(
+                    "No IP underlayer to compute checksum. Leaving null."
+                )
         return p
 
     def extract_padding(self, s):
@@ -810,8 +873,15 @@ class ICMP(Packet):
                    ConditionalField(ByteField("length", 0), lambda pkt:pkt.type in [3, 11, 12]),  # noqa: E501
                    ConditionalField(IPField("addr_mask", "0.0.0.0"), lambda pkt:pkt.type in [17, 18]),  # noqa: E501
                    ConditionalField(ShortField("nexthopmtu", 0), lambda pkt:pkt.type == 3),  # noqa: E501
-                   ConditionalField(ShortField("unused", 0), lambda pkt:pkt.type in [11, 12]),  # noqa: E501
-                   ConditionalField(IntField("unused", 0), lambda pkt:pkt.type not in [0, 3, 5, 8, 11, 12, 13, 14, 15, 16, 17, 18])  # noqa: E501
+                   MultipleTypeField(
+                       [
+                           (ShortField("unused", 0),
+                               lambda pkt:pkt.type in [11, 12]),
+                           (IntField("unused", 0),
+                               lambda pkt:pkt.type not in [0, 3, 5, 8, 11, 12,
+                                                           13, 14, 15, 16, 17,
+                                                           18])
+                       ], StrFixedLenField("unused", "", length=0)),
                    ]
 
     def post_build(self, p, pay):
@@ -940,8 +1010,8 @@ bind_layers(Ether, IP, type=2048)
 bind_layers(CookedLinux, IP, proto=2048)
 bind_layers(GRE, IP, proto=2048)
 bind_layers(SNAP, IP, code=2048)
-bind_layers(Loopback, IP, type=0)
-bind_layers(Loopback, IP, type=2)
+bind_bottom_up(Loopback, IP, type=0)
+bind_layers(Loopback, IP, type=socket.AF_INET)
 bind_layers(IPerror, IPerror, frag=0, proto=4)
 bind_layers(IPerror, ICMPerror, frag=0, proto=1)
 bind_layers(IPerror, TCPerror, frag=0, proto=6)
@@ -975,11 +1045,12 @@ conf.neighbor.register_l3(Dot3, IP, inet_register_l3)
 @conf.commands.register
 def fragment(pkt, fragsize=1480):
     """Fragment a big IP datagram"""
-    fragsize = (fragsize + 7) // 8 * 8
+    lastfragsz = fragsize
+    fragsize -= fragsize % 8
     lst = []
     for p in pkt:
         s = raw(p[IP].payload)
-        nb = (len(s) + fragsize - 1) // fragsize
+        nb = (len(s) - lastfragsz + fragsize - 1) // fragsize + 1
         for i in range(nb):
             q = p.copy()
             del(q[IP].payload)
@@ -987,8 +1058,11 @@ def fragment(pkt, fragsize=1480):
             del(q[IP].len)
             if i != nb - 1:
                 q[IP].flags |= 1
+                fragend = (i + 1) * fragsize
+            else:
+                fragend = i * fragsize + lastfragsz
             q[IP].frag += i * fragsize // 8
-            r = conf.raw_layer(load=s[i * fragsize:(i + 1) * fragsize])
+            r = conf.raw_layer(load=s[i * fragsize:fragend])
             r.overload_fields = p[IP].payload.overload_fields.copy()
             q.add_payload(r)
             lst.append(q)
@@ -1020,7 +1094,7 @@ def _defrag_list(lst, defrag, missfrag):
     p = lst[0]
     lastp = lst[-1]
     if p.frag > 0 or lastp.flags.MF:  # first or last fragment missing
-        missfrag.append(lst)
+        missfrag.extend(lst)
         return
     p = p.copy()
     if conf.padding_layer in p:
@@ -1035,7 +1109,7 @@ def _defrag_list(lst, defrag, missfrag):
         if clen != q.frag << 3:  # Wrong fragmentation offset
             if clen > q.frag << 3:
                 warning("Fragment overlap (%i > %i) %r || %r ||  %r" % (clen, q.frag << 3, p, txt, q))  # noqa: E501
-            missfrag.append(lst)
+            missfrag.extend(lst)
             break
         if q[IP].len is None or q[IP].ihl is None:
             clen += len(q[IP].payload)
@@ -1159,7 +1233,7 @@ def _packetlist_timeskew_graph(self, ip, **kargs):
     return lines
 
 
-PacketList.timeskew_graph = _packetlist_timeskew_graph
+_PacketList.timeskew_graph = _packetlist_timeskew_graph
 
 
 # Create a new packet list
@@ -1168,7 +1242,7 @@ class TracerouteResult(SndRcvList):
                  "nloc"]
 
     def __init__(self, res=None, name="Traceroute", stats=None):
-        PacketList.__init__(self, res, name, stats)
+        SndRcvList.__init__(self, res, name, stats)
         self.graphdef = None
         self.graphASres = None
         self.padding = 0
@@ -1194,9 +1268,9 @@ class TracerouteResult(SndRcvList):
                 m = min(x for x, y in six.iteritems(k) if y[1])
             except ValueError:
                 continue
-            for l in list(k):  # use list(): k is modified in the loop
-                if l > m:
-                    del k[l]
+            for li in list(k):  # use list(): k is modified in the loop
+                if li > m:
+                    del k[li]
         return trace
 
     def trace3D(self, join=True):
@@ -1292,7 +1366,6 @@ Touch screen: pinch/extend to zoom, swipe or two-finger rotate."""
             )
         )
         vpython.scene.exit = True
-        start = vpython.box()
         rings = {}
         tr3d = {}
         for i in trace:
@@ -1371,30 +1444,41 @@ Touch screen: pinch/extend to zoom, swipe or two-finger rotate."""
             import geoip2.database
             import geoip2.errors
         except ImportError:
-            warning("Cannot import geoip2. Won't be able to plot the world.")
+            log_runtime.error(
+                "Cannot import geoip2. Won't be able to plot the world."
+            )
             return []
         # Check availability of database
         if not conf.geoip_city:
-            warning("Cannot import the geolite2 CITY database.\n"
-                    "Download it from http://dev.maxmind.com/geoip/geoip2/geolite2/"  # noqa: E501
-                    " then set its path to conf.geoip_city")
+            log_runtime.error(
+                "Cannot import the geolite2 CITY database.\n"
+                "Download it from http://dev.maxmind.com/geoip/geoip2/geolite2/"  # noqa: E501
+                " then set its path to conf.geoip_city"
+            )
             return []
         # Check availability of plotting devices
         try:
             import cartopy.crs as ccrs
         except ImportError:
-            warning("Cannot import cartopy.\n"
-                    "More infos on http://scitools.org.uk/cartopy/docs/latest/installing.html")  # noqa: E501
+            log_runtime.error(
+                "Cannot import cartopy.\n"
+                "More infos on http://scitools.org.uk/cartopy/docs/latest/installing.html"  # noqa: E501
+            )
             return []
         if not MATPLOTLIB:
-            warning("Matplotlib is not installed. Won't be able to plot the world.")  # noqa: E501
+            log_runtime.error(
+                "Matplotlib is not installed. Won't be able to plot the world."
+            )
             return []
 
         # Open & read the GeoListIP2 database
         try:
             db = geoip2.database.Reader(conf.geoip_city)
         except Exception:
-            warning("Cannot open geoip2 database at %s", conf.geoip_city)
+            log_runtime.error(
+                "Cannot open geoip2 database at %s",
+                conf.geoip_city
+            )
             return []
 
         # Regroup results per trace
@@ -1642,8 +1726,17 @@ Touch screen: pinch/extend to zoom, swipe or two-finger rotate."""
 @conf.commands.register
 def traceroute(target, dport=80, minttl=1, maxttl=30, sport=RandShort(), l4=None, filter=None, timeout=2, verbose=None, **kargs):  # noqa: E501
     """Instant TCP traceroute
-traceroute(target, [maxttl=30,] [dport=80,] [sport=80,] [verbose=conf.verb]) -> None  # noqa: E501
-"""
+
+       :param target:  hostnames or IP addresses
+       :param dport:   TCP destination port (default is 80)
+       :param minttl:  minimum TTL (default is 1)
+       :param maxttl:  maximum TTL (default is 30)
+       :param sport:   TCP source port (default is random)
+       :param l4:      use a Scapy packet instead of TCP
+       :param filter:  BPF filter applied to received packets
+       :param timeout: time to wait for answers (default is 2s)
+       :param verbose: detailed output
+       :return: an TracerouteResult, and a list of unanswered packets"""
     if verbose is None:
         verbose = conf.verb
     if filter is None:
@@ -1670,9 +1763,10 @@ traceroute(target, [maxttl=30,] [dport=80,] [sport=80,] [verbose=conf.verb]) -> 
 def traceroute_map(ips, **kargs):
     """Util function to call traceroute on multiple targets, then
     show the different paths on a map.
-    params:
-     - ips: a list of IPs on which traceroute will be called
-     - optional: kwargs, passed to traceroute"""
+
+    :param ips: a list of IPs on which traceroute will be called
+    :param kargs: (optional) kwargs, passed to traceroute
+    """
     kargs.setdefault("verbose", 0)
     return traceroute(ips)[0].world_trace()
 
@@ -1682,24 +1776,38 @@ def traceroute_map(ips, **kargs):
 
 
 class TCP_client(Automaton):
+    """
+    Creates a TCP Client Automaton.
+    This automaton will handle TCP 3-way handshake.
 
+    Usage: the easiest usage is to use it as a SuperSocket.
+        >>> a = TCP_client.tcplink(HTTP, "www.google.com", 80)
+        >>> a.send(HTTPRequest())
+        >>> a.recv()
+
+    :param ip: the ip to connect to
+    :param port:
+    """
     def parse_args(self, ip, port, *args, **kargs):
+        from scapy.sessions import TCPSession
         self.dst = str(Net(ip))
         self.dport = port
         self.sport = random.randrange(0, 2**16)
         self.l4 = IP(dst=ip) / TCP(sport=self.sport, dport=self.dport, flags=0,
                                    seq=random.randrange(0, 2**32))
         self.src = self.l4.src
-        self.swin = self.l4[TCP].window
-        self.dwin = 1
-        self.rcvbuf = b""
+        self.sack = self.l4[TCP].ack
+        self.rel_seq = None
+        self.rcvbuf = TCPSession(prn=self._transmit_packet, store=False)
         bpf = "host %s  and host %s and port %i and port %i" % (self.src,
                                                                 self.dst,
                                                                 self.sport,
                                                                 self.dport)
-
-#        bpf=None
         Automaton.parse_args(self, filter=bpf, **kargs)
+
+    def _transmit_packet(self, pkt):
+        """Transmits a packet from TCPSession to the SuperSocket"""
+        self.oi.tcp.send(raw(pkt[TCP].payload))
 
     def master_filter(self, pkt):
         return (IP in pkt and
@@ -1709,7 +1817,7 @@ class TCP_client(Automaton):
                 pkt[TCP].sport == self.dport and
                 pkt[TCP].dport == self.sport and
                 self.l4[TCP].seq >= pkt[TCP].ack and  # XXX: seq/ack 2^32 wrap up  # noqa: E501
-                ((self.l4[TCP].ack == 0) or (self.l4[TCP].ack <= pkt[TCP].seq <= self.l4[TCP].ack + self.swin)))  # noqa: E501
+                ((self.l4[TCP].ack == 0) or (self.sack <= pkt[TCP].seq <= self.l4[TCP].ack + pkt[TCP].window)))  # noqa: E501
 
     @ATMT.state(initial=1)
     def START(self):
@@ -1731,6 +1839,14 @@ class TCP_client(Automaton):
     def CLOSED(self):
         pass
 
+    @ATMT.state(stop=1)
+    def STOP(self):
+        pass
+
+    @ATMT.state()
+    def STOP_SENT_FIN_ACK(self):
+        pass
+
     @ATMT.condition(START)
     def connect(self):
         raise self.SYN_SENT()
@@ -1743,7 +1859,7 @@ class TCP_client(Automaton):
 
     @ATMT.receive_condition(SYN_SENT)
     def synack_received(self, pkt):
-        if pkt[TCP].flags & 0x3f == 0x12:
+        if pkt[TCP].flags.SA:
             raise self.ESTABLISHED().action_parameters(pkt)
 
     @ATMT.action(synack_received)
@@ -1754,20 +1870,20 @@ class TCP_client(Automaton):
 
     @ATMT.receive_condition(ESTABLISHED)
     def incoming_data_received(self, pkt):
-        if not isinstance(pkt[TCP].payload, NoPayload) and not isinstance(pkt[TCP].payload, conf.padding_layer):  # noqa: E501
+        if not isinstance(pkt[TCP].payload, (NoPayload, conf.padding_layer)):
             raise self.ESTABLISHED().action_parameters(pkt)
 
     @ATMT.action(incoming_data_received)
     def receive_data(self, pkt):
         data = raw(pkt[TCP].payload)
         if data and self.l4[TCP].ack == pkt[TCP].seq:
+            self.sack = self.l4[TCP].ack
             self.l4[TCP].ack += len(data)
             self.l4[TCP].flags = "A"
+            # Answer with an Ack
             self.send(self.l4)
-            self.rcvbuf += data
-            if pkt[TCP].flags.P:
-                self.oi.tcp.send(self.rcvbuf)
-                self.rcvbuf = b""
+            # Process data - will be sent to the SuperSocket through this
+            self.rcvbuf.on_packet_received(pkt)
 
     @ATMT.ioevent(ESTABLISHED, name="tcp", as_supersocket="tcplink")
     def outgoing_data_received(self, fd):
@@ -1781,12 +1897,12 @@ class TCP_client(Automaton):
 
     @ATMT.receive_condition(ESTABLISHED)
     def reset_received(self, pkt):
-        if pkt[TCP].flags & 4 != 0:
+        if pkt[TCP].flags.R:
             raise self.CLOSED()
 
     @ATMT.receive_condition(ESTABLISHED)
     def fin_received(self, pkt):
-        if pkt[TCP].flags & 0x1 == 1:
+        if pkt[TCP].flags.F:
             raise self.LAST_ACK().action_parameters(pkt)
 
     @ATMT.action(fin_received)
@@ -1798,8 +1914,33 @@ class TCP_client(Automaton):
 
     @ATMT.receive_condition(LAST_ACK)
     def ack_of_fin_received(self, pkt):
-        if pkt[TCP].flags & 0x3f == 0x10:
+        if pkt[TCP].flags.A:
             raise self.CLOSED()
+
+    @ATMT.condition(STOP)
+    def stop_requested(self):
+        raise self.STOP_SENT_FIN_ACK()
+
+    @ATMT.action(stop_requested)
+    def stop_send_finack(self):
+        self.l4[TCP].flags = "FA"
+        self.send(self.l4)
+        self.l4[TCP].seq += 1
+
+    @ATMT.receive_condition(STOP_SENT_FIN_ACK)
+    def stop_fin_received(self, pkt):
+        if pkt[TCP].flags.F:
+            raise self.CLOSED().action_parameters(pkt)
+
+    @ATMT.action(stop_fin_received)
+    def stop_send_ack(self, pkt):
+        self.l4[TCP].flags = "A"
+        self.l4[TCP].ack = pkt[TCP].seq + 1
+        self.send(self.l4)
+
+    @ATMT.timeout(STOP_SENT_FIN_ACK, 1)
+    def stop_ack_timeout(self):
+        raise self.CLOSED()
 
 
 #####################
@@ -1849,20 +1990,21 @@ funcpres: a function used to summarize packets"""
 
 
 @conf.commands.register
-def fragleak(target, sport=123, dport=123, timeout=0.2, onlyasc=0):
+def fragleak(target, sport=123, dport=123, timeout=0.2, onlyasc=0, count=None):
     load = "XXXXYYYYYYYYYY"
-#    getmacbyip(target)
-#    pkt = IP(dst=target, id=RandShort(), options=b"\x22"*40)/UDP()/load
-    pkt = IP(dst=target, id=RandShort(), options=b"\x00" * 40, flags=1) / UDP(sport=sport, dport=sport) / load  # noqa: E501
+    pkt = IP(dst=target, id=RandShort(), options=b"\x00" * 40, flags=1)
+    pkt /= UDP(sport=sport, dport=sport) / load
     s = conf.L3socket()
     intr = 0
     found = {}
     try:
-        while True:
+        while count is None or count:
+            if count is not None and isinstance(count, int):
+                count -= 1
             try:
                 if not intr:
                     s.send(pkt)
-                sin, sout, serr = select([s], [], [], timeout)
+                sin = select.select([s], [], [], timeout)[0]
                 if not sin:
                     continue
                 ans = s.recv(1600)
@@ -1875,19 +2017,9 @@ def fragleak(target, sport=123, dport=123, timeout=0.2, onlyasc=0):
                 if ans.payload.payload.dst != target:
                     continue
                 if ans.src != target:
-                    print("leak from", ans.src, end=' ')
-
-
-#                print repr(ans)
+                    print("leak from", ans.src)
                 if not ans.haslayer(conf.padding_layer):
                     continue
-
-
-#                print repr(ans.payload.payload.payload.payload)
-
-#                if not isinstance(ans.payload.payload.payload.payload, conf.raw_layer):  # noqa: E501
-#                    continue
-#                leak = ans.payload.payload.payload.payload.load[len(load):]
                 leak = ans.getlayer(conf.padding_layer).load
                 if leak not in found:
                     found[leak] = None
@@ -1901,11 +2033,16 @@ def fragleak(target, sport=123, dport=123, timeout=0.2, onlyasc=0):
 
 
 @conf.commands.register
-def fragleak2(target, timeout=0.4, onlyasc=0):
+def fragleak2(target, timeout=0.4, onlyasc=0, count=None):
     found = {}
     try:
-        while True:
-            p = sr1(IP(dst=target, options=b"\x00" * 40, proto=200) / "XXXXYYYYYYYYYYYY", timeout=timeout, verbose=0)  # noqa: E501
+        while count is None or count:
+            if count is not None and isinstance(count, int):
+                count -= 1
+
+            pkt = IP(dst=target, options=b"\x00" * 40, proto=200)
+            pkt /= "XXXXYYYYYYYYYYYY"
+            p = sr1(pkt, timeout=timeout, verbose=0)
             if not p:
                 continue
             if conf.padding_layer in p:
@@ -1915,6 +2052,34 @@ def fragleak2(target, timeout=0.4, onlyasc=0):
                     linehexdump(leak, onlyasc=onlyasc)
     except Exception:
         pass
+
+
+class ICMPEcho_am(AnsweringMachine):
+    """Responds to ICMP Echo-Requests (ping)"""
+    function_name = "icmpechod"
+
+    def is_request(self, req):
+        if req.haslayer(ICMP):
+            icmp_req = req.getlayer(ICMP)
+            if icmp_req.type == 8:  # echo-request
+                return True
+
+        return False
+
+    def print_reply(self, req, reply):
+        print("Replying %s to %s" % (reply.getlayer(IP).dst, req.dst))
+
+    def make_reply(self, req):
+        reply = req.copy()
+        reply[ICMP].type = 0  # echo-reply
+        # Force re-generation of the checksum
+        reply[ICMP].chksum = None
+        if req.haslayer(IP):
+            reply[IP].src, reply[IP].dst = req[IP].dst, req[IP].src
+            reply[IP].chksum = None
+        if req.haslayer(Ether):
+            reply[Ether].src, reply[Ether].dst = req[Ether].dst, req[Ether].src
+        return reply
 
 
 conf.stats_classic_protocols += [TCP, UDP, ICMP]

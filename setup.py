@@ -14,13 +14,17 @@ import os
 
 def get_long_description():
     """Extract description from README.md, for PyPI's usage"""
+    def process_ignore_tags(buffer):
+        return "\n".join(
+            x for x in buffer.split("\n") if "<!-- ignore_ppi -->" not in x
+        )
     try:
         fpath = os.path.join(os.path.dirname(__file__), "README.md")
         with io.open(fpath, encoding="utf-8") as f:
             readme = f.read()
             desc = readme.partition("<!-- start_ppi_description -->")[2]
             desc = desc.partition("<!-- stop_ppi_description -->")[0]
-            return desc.strip()
+            return process_ignore_tags(desc.strip())
     except IOError:
         return None
 
@@ -50,6 +54,11 @@ setup(
             'pyx',
             'cryptography>=2.0',
             'matplotlib'
+        ],
+        'docs': [
+            'sphinx>=3.0.0',
+            'sphinx_rtd_theme>=0.4.3',
+            'tox>=3.0.0'
         ]
     },
     # We use __file__ in scapy/__init__.py, therefore Scapy isn't zip safe
@@ -86,6 +95,8 @@ setup(
         "Programming Language :: Python :: 3.5",
         "Programming Language :: Python :: 3.6",
         "Programming Language :: Python :: 3.7",
+        "Programming Language :: Python :: 3.8",
+        "Programming Language :: Python :: 3.9",
         "Topic :: Security",
         "Topic :: System :: Networking",
         "Topic :: System :: Networking :: Monitoring",

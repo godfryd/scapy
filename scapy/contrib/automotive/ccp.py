@@ -1,5 +1,3 @@
-#! /usr/bin/env python
-
 # This file is part of Scapy
 # See http://www.secdev.org/projects/scapy for more information
 # Copyright (C) Nils Weiss <nils@we155.de>
@@ -531,6 +529,10 @@ class DTO(Packet):
             self.payload_cls = kwargs["payload_cls"]
             del kwargs["payload_cls"]
         Packet.__init__(self, *args, **kwargs)
+
+    def __eq__(self, other):
+        return super(DTO, self).__eq__(other) and \
+            self.payload_cls == other.payload_cls
 
     def guess_payload_class(self, payload):
         return self.payload_cls

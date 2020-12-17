@@ -1297,7 +1297,7 @@ _tls_cipher_suites[0x00ff] = "TLS_EMPTY_RENEGOTIATION_INFO_SCSV"
 _tls_cipher_suites[0x5600] = "TLS_FALLBACK_SCSV"
 
 
-def get_usable_ciphersuites(l, kx):
+def get_usable_ciphersuites(li, kx):
     """
     From a list of proposed ciphersuites, this function returns a list of
     usable cipher suites, i.e. for which key exchange, cipher and hash
@@ -1306,12 +1306,14 @@ def get_usable_ciphersuites(l, kx):
     function matches the one of the proposal.
     """
     res = []
-    for c in l:
+    for c in li:
         if c in _tls_cipher_suites_cls:
             ciph = _tls_cipher_suites_cls[c]
             if ciph.usable:
                 # XXX select among RSA and ECDSA cipher suites
                 # according to the key(s) the server was given
-                if ciph.kx_alg.anonymous or kx in ciph.kx_alg.name:
+                if (ciph.kx_alg.anonymous or
+                   kx in ciph.kx_alg.name or
+                   ciph.kx_alg.name == "TLS13"):
                     res.append(c)
     return res

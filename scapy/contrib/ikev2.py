@@ -1,5 +1,3 @@
-#!/usr/bin/env python
-
 # This file is part of Scapy
 # Scapy is free software: you can redistribute it and/or modify
 # it under the terms of the GNU General Public License as published by
@@ -396,7 +394,7 @@ IKEv2_exchange_type.extend(["IKE_SA_INIT", "IKE_AUTH", "CREATE_CHILD_SA",
 class IKEv2_class(Packet):
     def guess_payload_class(self, payload):
         np = self.next_payload
-        logging.debug("For IKEv2_class np=%d" % np)
+        logging.debug("For IKEv2_class np=%d", np)
         if np == 0:
             return conf.raw_layer
         elif np < len(IKEv2_payload_type):

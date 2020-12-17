@@ -528,7 +528,7 @@ class PadFieldWithLen(PadField):
     """PadField which handles the i2len function to include padding"""
     def i2len(self, pkt, val):
         """get the length of the field, including the padding length"""
-        fld_len = self._fld.i2len(pkt, val)
+        fld_len = self.fld.i2len(pkt, val)
         return fld_len + self.padlen(fld_len)
 
 
@@ -967,7 +967,7 @@ class PNIOServiceReqPDU(Packet):
 
     @classmethod
     def can_handle(cls, pkt, rpc):
-        """heuristical guess_payload_class"""
+        """heuristic guess_payload_class"""
         # type = 0 => request
         if rpc.getfieldval("type") == 0 and \
                 str(rpc.object_uuid).startswith("dea00000-6c97-11d1-8271-"):
@@ -999,7 +999,7 @@ class PNIOServiceResPDU(Packet):
 
     @classmethod
     def can_handle(cls, pkt, rpc):
-        """heuristical guess_payload_class"""
+        """heuristic guess_payload_class"""
         # type = 2 => response
         if rpc.getfieldval("type") == 2 and \
                 str(rpc.object_uuid).startswith("dea00000-6c97-11d1-8271-"):

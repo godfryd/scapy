@@ -335,9 +335,9 @@ class ASN1_BIT_STRING(ASN1_Object):
             else:
                 warning("Invalid val: should be bytes")
                 val = "<invalid val_readable>"
-            super(ASN1_Object, self).__setattr__("val", val)
-            super(ASN1_Object, self).__setattr__(name, value)
-            super(ASN1_Object, self).__setattr__("unused_bits", 0)
+            object.__setattr__(self, "val", val)
+            object.__setattr__(self, name, value)
+            object.__setattr__(self, "unused_bits", 0)
         elif name == "val":
             value = plain_str(value)
             if isinstance(value, str):
@@ -356,14 +356,14 @@ class ASN1_BIT_STRING(ASN1_Object):
                 warning("Invalid val: should be str")
                 val_readable = b"<invalid val>"
                 unused_bits = 0
-            super(ASN1_Object, self).__setattr__("val_readable", val_readable)
-            super(ASN1_Object, self).__setattr__(name, value)
-            super(ASN1_Object, self).__setattr__("unused_bits", unused_bits)
+            object.__setattr__(self, "val_readable", val_readable)
+            object.__setattr__(self, name, value)
+            object.__setattr__(self, "unused_bits", unused_bits)
         elif name == "unused_bits":
             warning("Invalid operation: unused_bits rewriting "
                     "is not supported.")
         else:
-            super(ASN1_Object, self).__setattr__(name, value)
+            object.__setattr__(self, name, value)
 
     def __repr__(self):
         s = self.val_readable
@@ -396,7 +396,8 @@ class ASN1_OID(ASN1_Object):
     tag = ASN1_Class_UNIVERSAL.OID
 
     def __init__(self, val):
-        val = conf.mib._oid(plain_str(val))
+        val = plain_str(val)
+        val = conf.mib._oid(val)
         ASN1_Object.__init__(self, val)
         self.oidname = conf.mib._oidname(val)
 

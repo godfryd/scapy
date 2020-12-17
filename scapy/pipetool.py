@@ -1,5 +1,3 @@
-#! /usr/bin/env python
-
 # This file is part of Scapy
 # See http://www.secdev.org/projects/scapy for more information
 # Copyright (C) Philippe Biondi <phil@secdev.org>
@@ -15,7 +13,7 @@ from threading import Lock, Thread
 
 from scapy.automaton import Message, select_objects, SelectableObject
 from scapy.consts import WINDOWS
-from scapy.error import log_interactive, warning
+from scapy.error import log_runtime, warning
 from scapy.config import conf
 from scapy.utils import get_temp_file, do_graph
 
@@ -50,6 +48,7 @@ class PipeEngine(SelectableObject):
         self.__fd_queue = collections.deque()
         self.__fdr, self.__fdw = os.pipe()
         self.thread = None
+        SelectableObject.__init__(self)
 
     def __getattr__(self, attr):
         if attr.startswith("spawn_"):
@@ -90,11 +89,11 @@ class PipeEngine(SelectableObject):
             self.active_sinks.add(pipe)
 
     def get_pipe_list(self, pipe):
-        def flatten(p, l):
-            l.add(p)
+        def flatten(p, li):
+            li.add(p)
             for q in p.sources | p.sinks | p.high_sources | p.high_sinks:
-                if q not in l:
-                    flatten(q, l)
+                if q not in li:
+                    flatten(q, li)
         pl = set()
         flatten(pipe, pl)
         return pl
@@ -109,7 +108,7 @@ class PipeEngine(SelectableObject):
         return pl
 
     def run(self):
-        log_interactive.info("Pipe engine thread started.")
+        log_runtime.debug("Pipe engine thread started.")
         try:
             for p in self.active_pipes:
                 p.start()
@@ -132,12 +131,14 @@ class PipeEngine(SelectableObject):
                             sources = self.active_sources - exhausted
                             sources.add(self)
                         else:
-                            warning("Unknown internal pipe engine command: %r. Ignoring." % cmd)  # noqa: E501
+                            warning("Unknown internal pipe engine command: %r."
+                                    " Ignoring.", cmd)
                     elif fd in sources:
                         try:
                             fd.deliver()
                         except Exception as e:
-                            log_interactive.exception("piping from %s failed: %s" % (fd.name, e))  # noqa: E501
+                            log_runtime.exception("piping from %s failed: %s",
+                                                  fd.name, e)
                         else:
                             if fd.exhausted():
                                 exhausted.add(fd)
@@ -150,16 +151,16 @@ class PipeEngine(SelectableObject):
                     p.stop()
             finally:
                 self.thread_lock.release()
-                log_interactive.info("Pipe engine thread stopped.")
+                log_runtime.debug("Pipe engine thread stopped.")
 
     def start(self):
         if self.thread_lock.acquire(0):
-            _t = Thread(target=self.run)
+            _t = Thread(target=self.run, name="scapy.pipetool.PipeEngine")
             _t.setDaemon(True)
             _t.start()
             self.thread = _t
         else:
-            warning("Pipe engine already running")
+            log_runtime.debug("Pipe engine already running")
 
     def wait_and_stop(self):
         self.stop(_cmd="B")
@@ -175,7 +176,7 @@ class PipeEngine(SelectableObject):
                     except Exception:
                         pass
                 else:
-                    warning("Pipe engine thread not running")
+                    log_runtime.debug("Pipe engine thread not running")
         except KeyboardInterrupt:
             print("Interrupted by user.")
 
@@ -328,6 +329,7 @@ class Pipe(six.with_metaclass(_PipeMeta, _ConnectorLogic)):
 class Source(Pipe, SelectableObject):
     def __init__(self, name=None):
         Pipe.__init__(self, name=name)
+        SelectableObject.__init__(self)
         self.is_exhausted = False
 
     def _read_message(self):
@@ -355,12 +357,15 @@ class Source(Pipe, SelectableObject):
 
 class Drain(Pipe):
     """Repeat messages from low/high entries to (resp.) low/high exits
-     +-------+
-  >>-|-------|->>
-     |       |
-   >-|-------|->
-     +-------+
-"""
+
+    .. code::
+
+         +-------+
+      >>-|-------|->>
+         |       |
+       >-|-------|->
+         +-------+
+    """
 
     def push(self, msg):
         self._send(msg)
@@ -376,10 +381,34 @@ class Drain(Pipe):
 
 
 class Sink(Pipe):
+    """
+    Does nothing; interface to extend for custom sinks.
+
+    All sinks have the following constructor parameters:
+
+    :param name: a human-readable name for the element
+    :type name: str
+    """
     def push(self, msg):
+        """
+        Called by :py:class:`PipeEngine` when there is a new message for the
+        low entry.
+
+        :param msg: The message data
+        :returns: None
+        :rtype: None
+        """
         pass
 
     def high_push(self, msg):
+        """
+        Called by :py:class:`PipeEngine` when there is a new message for the
+        high entry.
+
+        :param msg: The message data
+        :returns: None
+        :rtype: None
+        """
         pass
 
     def start(self):
@@ -391,6 +420,7 @@ class Sink(Pipe):
 
 class AutoSource(Source, SelectableObject):
     def __init__(self, name=None):
+        SelectableObject.__init__(self)
         Source.__init__(self, name=name)
         self.__fdr, self.__fdw = os.pipe()
         self._queue = collections.deque()
@@ -436,36 +466,47 @@ class ThreadGenSource(AutoSource):
 
     def start(self):
         self.RUN = True
-        Thread(target=self.generate).start()
+        Thread(target=self.generate,
+               name="scapy.pipetool.ThreadGenSource").start()
 
     def stop(self):
         self.RUN = False
 
 
 class ConsoleSink(Sink):
-    """Print messages on low and high entries
-     +-------+
-  >>-|--.    |->>
-     | print |
-   >-|--'    |->
-     +-------+
-"""
+    """Print messages on low and high entries to ``stdout``
+
+    .. code::
+
+         +-------+
+      >>-|--.    |->>
+         | print |
+       >-|--'    |->
+         +-------+
+    """
 
     def push(self, msg):
-        print(">%r" % msg)
+        print(">" + repr(msg))
 
     def high_push(self, msg):
-        print(">>%r" % msg)
+        print(">>" + repr(msg))
 
 
 class RawConsoleSink(Sink):
     """Print messages on low and high entries, using os.write
-     +-------+
-  >>-|--.    |->>
-     | write |
-   >-|--'    |->
-     +-------+
-"""
+
+    .. code::
+
+         +-------+
+      >>-|--.    |->>
+         | write |
+       >-|--'    |->
+         +-------+
+
+    :param newlines: Include a new-line character after printing each packet.
+                     Defaults to True.
+    :type newlines: bool
+    """
 
     def __init__(self, name=None, newlines=True):
         Sink.__init__(self, name=name)
@@ -484,13 +525,16 @@ class RawConsoleSink(Sink):
 
 
 class CLIFeeder(AutoSource):
-    """Send messages from python command line
-     +--------+
-  >>-|        |->>
-     | send() |
-   >-|   `----|->
-     +--------+
-"""
+    """Send messages from python command line:
+
+    .. code::
+
+         +--------+
+      >>-|        |->>
+         | send() |
+       >-|   `----|->
+         +--------+
+    """
 
     def send(self, msg):
         self._gen_data(msg)
@@ -500,26 +544,32 @@ class CLIFeeder(AutoSource):
 
 
 class CLIHighFeeder(CLIFeeder):
-    """Send messages from python command line to high output
-     +--------+
-  >>-|   .----|->>
-     | send() |
-   >-|        |->
-     +--------+
-"""
+    """Send messages from python command line to high output:
+
+    .. code::
+
+         +--------+
+      >>-|   .----|->>
+         | send() |
+       >-|        |->
+         +--------+
+    """
 
     def send(self, msg):
         self._gen_high_data(msg)
 
 
 class PeriodicSource(ThreadGenSource):
-    """Generage messages periodically on low exit
-     +-------+
-  >>-|       |->>
-     | msg,T |
-   >-|  `----|->
-     +-------+
-"""
+    """Generage messages periodically on low exit:
+
+    .. code::
+
+         +-------+
+      >>-|       |->>
+         | msg,T |
+       >-|  `----|->
+         +-------+
+    """
 
     def __init__(self, msg, period, period2=0, name=None):
         ThreadGenSource.__init__(self, name=name)
@@ -543,15 +593,32 @@ class PeriodicSource(ThreadGenSource):
 
 
 class TermSink(Sink):
-    """Print messages on low and high entries on a separate terminal
-     +-------+
-  >>-|--.    |->>
-     | print |
-   >-|--'    |->
-     +-------+
-"""
+    """
+    Prints messages on the low and high entries, on a separate terminal (xterm
+    or cmd).
 
-    def __init__(self, name=None, keepterm=True, newlines=True, openearly=True):  # noqa: E501
+    .. code::
+
+         +-------+
+      >>-|--.    |->>
+         | print |
+       >-|--'    |->
+         +-------+
+
+    :param keepterm: Leave the terminal window open after :py:meth:`~Pipe.stop`
+                     is called. Defaults to True.
+    :type keepterm: bool
+    :param newlines: Include a new-line character after printing each packet.
+                     Defaults to True.
+    :type newlines: bool
+    :param openearly: Automatically starts the terminal when the constructor is
+                      called, rather than waiting for :py:meth:`~Pipe.start`.
+                      Defaults to True.
+    :type openearly: bool
+    """
+
+    def __init__(self, name=None, keepterm=True, newlines=True,
+                 openearly=True):
         Sink.__init__(self, name=name)
         self.keepterm = keepterm
         self.newlines = newlines
@@ -634,13 +701,19 @@ class TermSink(Sink):
 
 
 class QueueSink(Sink):
-    """Collect messages from high and low entries and queue them. Messages are unqueued with the .recv() method.  # noqa: E501
-     +-------+
-  >>-|--.    |->>
-     | queue |
-   >-|--'    |->
-     +-------+
-"""
+    """
+    Collects messages on the low and high entries into a :py:class:`Queue`.
+    Messages are dequeued with :py:meth:`recv`.
+    Both high and low entries share the same :py:class:`Queue`.
+
+    .. code::
+
+         +-------+
+      >>-|--.    |->>
+         | queue |
+       >-|--'    |->
+         +-------+
+    """
 
     def __init__(self, name=None):
         Sink.__init__(self, name=name)
@@ -652,22 +725,38 @@ class QueueSink(Sink):
     def high_push(self, msg):
         self.q.put(msg)
 
-    def recv(self):
-        while True:
-            try:
-                return self.q.get(True, timeout=0.1)
-            except six.moves.queue.Empty:
-                pass
+    def recv(self, block=True, timeout=None):
+        """
+        Reads the next message from the queue.
+
+        If no message is available in the queue, returns None.
+
+        :param block: Blocks execution until a packet is available in the
+                      queue. Defaults to True.
+        :type block: bool
+        :param timeout: Controls how long to wait if ``block=True``. If None
+                        (the default), this method will wait forever. If a
+                        non-negative number, this is a number of seconds to
+                        wait before giving up (and returning None).
+        :type timeout: None, int or float
+        """
+        try:
+            return self.q.get(block=block, timeout=timeout)
+        except six.moves.queue.Empty:
+            pass
 
 
 class TransformDrain(Drain):
-    """Apply a function to messages on low and high entry
-     +-------+
-  >>-|--[f]--|->>
-     |       |
-   >-|--[f]--|->
-     +-------+
-"""
+    """Apply a function to messages on low and high entry:
+
+    .. code::
+
+         +-------+
+      >>-|--[f]--|->>
+         |       |
+       >-|--[f]--|->
+         +-------+
+    """
 
     def __init__(self, f, name=None):
         Drain.__init__(self, name=name)
@@ -681,13 +770,16 @@ class TransformDrain(Drain):
 
 
 class UpDrain(Drain):
-    """Repeat messages from low entry to high exit
-     +-------+
-  >>-|    ,--|->>
-     |   /   |
-   >-|--'    |->
-     +-------+
-"""
+    """Repeat messages from low entry to high exit:
+
+    .. code::
+
+         +-------+
+      >>-|    ,--|->>
+         |   /   |
+       >-|--'    |->
+         +-------+
+    """
 
     def push(self, msg):
         self._high_send(msg)
@@ -697,13 +789,16 @@ class UpDrain(Drain):
 
 
 class DownDrain(Drain):
-    r"""Repeat messages from high entry to low exit
-     +-------+
-  >>-|--.    |->>
-     |   \   |
-   >-|    `--|->
-     +-------+
-"""
+    r"""Repeat messages from high entry to low exit:
+
+    .. code::
+
+         +-------+
+      >>-|--.    |->>
+         |   \   |
+       >-|    `--|->
+         +-------+
+    """
 
     def push(self, msg):
         pass

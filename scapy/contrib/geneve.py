@@ -14,8 +14,6 @@
 # You should have received a copy of the GNU General Public License
 # along with Scapy. If not, see <http://www.gnu.org/licenses/>.
 
-# flake8: noqa: E501
-
 # scapy.contrib.description = Generic Network Virtualization Encapsulation (GENEVE)
 # scapy.contrib.status = loads
 
@@ -41,7 +39,7 @@ class GENEVEOptionsField(XStrField):
     def getfield(self, pkt, s):
         opln = pkt.optionlen * 4
         if opln < 0:
-            warning("bad optionlen (%i). Assuming optionlen=0" % pkt.optionlen)
+            warning("bad optionlen (%i). Assuming optionlen=0", pkt.optionlen)
             opln = 0
         return s[opln:], self.m2i(pkt, s[:opln])
 

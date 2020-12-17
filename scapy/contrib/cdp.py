@@ -1,5 +1,3 @@
-#! /usr/bin/env python
-
 # scapy.contrib.description = Cisco Discovery Protocol (CDP)
 # scapy.contrib.status = loads
 
@@ -27,9 +25,21 @@ from __future__ import absolute_import
 import struct
 
 from scapy.packet import Packet, bind_layers
-from scapy.fields import ByteEnumField, ByteField, FieldLenField, FlagsField, \
-    IP6Field, IPField, PacketListField, ShortField, StrLenField, \
-    X3BytesField, XByteField, XShortEnumField, XShortField
+from scapy.fields import (
+    ByteEnumField,
+    ByteField,
+    FieldLenField,
+    FlagsField,
+    IP6Field,
+    IPField,
+    OUIField,
+    PacketListField,
+    ShortField,
+    StrLenField,
+    XByteField,
+    XShortEnumField,
+    XShortField,
+)
 from scapy.layers.inet import checksum
 from scapy.layers.l2 import SNAP
 from scapy.compat import orb, chb
@@ -48,7 +58,6 @@ _cdp_tlv_cls = {0x0001: "CDPMsgDeviceID",
                 0x0004: "CDPMsgCapabilities",
                 0x0005: "CDPMsgSoftwareVersion",
                 0x0006: "CDPMsgPlatform",
-                0x0007: "CDPMsgIPPrefix",
                 0x0008: "CDPMsgProtoHello",
                 0x0009: "CDPMsgVTPMgmtDomain",  # CDPv2
                 0x000a: "CDPMsgNativeVLAN",    # CDPv2
@@ -101,7 +110,14 @@ def _CDPGuessPayloadClass(p, **kargs):
     cls = conf.raw_layer
     if len(p) >= 2:
         t = struct.unpack("!H", p[:2])[0]
-        clsname = _cdp_tlv_cls.get(t, "CDPMsgGeneric")
+        if t == 0x0007 and len(p) > 4:
+            tmp_len = struct.unpack("!H", p[2:4])[0]
+            if tmp_len == 8:
+                clsname = "CDPMsgIPGateway"
+            else:
+                clsname = "CDPMsgIPPrefix"
+        else:
+            clsname = _cdp_tlv_cls.get(t, "CDPMsgGeneric")
         cls = globals()[clsname]
 
     return cls(p, **kargs)
@@ -185,13 +201,13 @@ class CDPMsgAddr(CDPMsgGeneric):
     name = "Addresses"
     fields_desc = [XShortEnumField("type", 0x0002, _cdp_tlv_types),
                    ShortField("len", None),
-                   FieldLenField("naddr", None, "addr", "!I"),
-                   PacketListField("addr", [], _CDPGuessAddrRecord, count_from=lambda x:x.naddr)]  # noqa: E501
+                   FieldLenField("naddr", None, fmt="!I", count_of="addr"),
+                   PacketListField("addr", [], _CDPGuessAddrRecord,
+                                   length_from=lambda x:x.len - 8)]
 
     def post_build(self, pkt, pay):
         if self.len is None:
-            tmp_len = 8 + len(self.addr) * 9
-            pkt = pkt[:2] + struct.pack("!H", tmp_len) + pkt[4:]
+            pkt = pkt[:2] + struct.pack("!H", len(pkt)) + pkt[4:]
         p = pkt + pay
         return p
 
@@ -235,12 +251,21 @@ _cdp_duplex = {0x00: "Half", 0x01: "Full"}
 # ODR Routing
 
 
-class CDPMsgIPPrefix(CDPMsgGeneric):
-    name = "IP Prefix"
+class CDPMsgIPGateway(CDPMsgGeneric):
+    name = "IP Gateway"
     type = 0x0007
     fields_desc = [XShortEnumField("type", 0x0007, _cdp_tlv_types),
                    ShortField("len", 8),
                    IPField("defaultgw", "192.168.0.1")]
+
+
+class CDPMsgIPPrefix(CDPMsgGeneric):
+    name = "IP Prefix"
+    type = 0x0007
+    fields_desc = [XShortEnumField("type", 0x0007, _cdp_tlv_types),
+                   ShortField("len", 9),
+                   IPField("prefix", "192.168.0.1"),
+                   ByteField("plen", 24)]
 
 
 class CDPMsgProtoHello(CDPMsgGeneric):
@@ -248,7 +273,7 @@ class CDPMsgProtoHello(CDPMsgGeneric):
     type = 0x0008
     fields_desc = [XShortEnumField("type", 0x0008, _cdp_tlv_types),
                    ShortField("len", 32),
-                   X3BytesField("oui", 0x00000c),
+                   OUIField("oui", 0x00000c),
                    XShortField("protocol_id", 0x0),
                    # TLV length (len) - 2 (type) - 2 (len) - 3 (OUI) - 2
                    # (Protocol ID)
@@ -357,9 +382,9 @@ class _CDPChecksum:
         This padding is only used for checksum computation.  The original
         packet should not be altered."""
         if len(pkt) % 2:
-            last_chr = pkt[-1]
-            if last_chr <= b'\x80':
-                return pkt[:-1] + b'\x00' + last_chr
+            last_chr = orb(pkt[-1])
+            if last_chr <= 0x80:
+                return pkt[:-1] + b'\x00' + chb(last_chr)
             else:
                 return pkt[:-1] + b'\xff' + chb(orb(last_chr) - 1)
         else:

@@ -10,11 +10,13 @@ Fields that hold random numbers.
 """
 
 from __future__ import absolute_import
+import copy
 import random
 import time
 import math
 import re
 import uuid
+import struct
 
 from scapy.base_classes import Net
 from scapy.compat import bytes_encode, chb, plain_str
@@ -83,12 +85,24 @@ class VolatileValue(object):
     def __repr__(self):
         return "<%s>" % self.__class__.__name__
 
+    def _command_args(self):
+        return ''
+
+    def command(self):
+        return "%s(%s)" % (self.__class__.__name__, self._command_args())
+
     def __eq__(self, other):
         x = self._fix()
         y = other._fix() if isinstance(other, VolatileValue) else other
         if not isinstance(x, type(y)):
             return False
         return x == y
+
+    def __ne__(self, other):
+        # Python 2.7 compat
+        return not self == other
+
+    __hash__ = None
 
     def __getattr__(self, attr):
         if attr in ["__setstate__", "__getstate__"]:
@@ -104,6 +118,9 @@ class VolatileValue(object):
     def __len__(self):
         return len(self._fix())
 
+    def copy(self):
+        return copy.copy(self)
+
     def _fix(self):
         return None
 
@@ -112,17 +129,8 @@ class RandField(VolatileValue):
     pass
 
 
-class RandNum(RandField):
-    """Instances evaluate to random integers in selected range"""
-    min = 0
-    max = 0
-
-    def __init__(self, min, max):
-        self.min = min
-        self.max = max
-
-    def _fix(self):
-        return random.randrange(self.min, self.max + 1)
+class _RandNumeral(RandField):
+    """Implements integer management in RandField"""
 
     def __int__(self):
         return int(self._fix())
@@ -162,12 +170,6 @@ class RandNum(RandField):
     def __le__(self, other):
         return self._fix() <= other
 
-    def __eq__(self, other):
-        return self._fix() == other
-
-    def __ne__(self, other):
-        return self._fix() != other
-
     def __ge__(self, other):
         return self._fix() >= other
 
@@ -193,28 +195,68 @@ class RandNum(RandField):
         return other | self._fix()
 
 
-class RandNumGamma(RandNum):
+class RandNum(_RandNumeral):
+    """Instances evaluate to random integers in selected range"""
+    min = 0
+    max = 0
+
+    def __init__(self, min, max):
+        self.min = min
+        self.max = max
+
+    def _command_args(self):
+        if self.__class__.__name__ == 'RandNum':
+            return "min=%r, max=%r" % (self.min, self.max)
+        return super(RandNum, self)._command_args()
+
+    def _fix(self):
+        return random.randrange(self.min, self.max + 1)
+
+
+class RandFloat(RandNum):
+    def _fix(self):
+        return random.uniform(self.min, self.max)
+
+
+class RandBinFloat(RandNum):
+    def _fix(self):
+        return struct.unpack("!f", bytes(RandBin(4)))[0]
+
+
+class RandNumGamma(_RandNumeral):
     def __init__(self, alpha, beta):
         self.alpha = alpha
         self.beta = beta
+
+    def _command_args(self):
+        return "alpha=%r, beta=%r" % (self.alpha, self.beta)
 
     def _fix(self):
         return int(round(random.gammavariate(self.alpha, self.beta)))
 
 
-class RandNumGauss(RandNum):
+class RandNumGauss(_RandNumeral):
     def __init__(self, mu, sigma):
         self.mu = mu
         self.sigma = sigma
+
+    def _command_args(self):
+        return "mu=%r, sigma=%r" % (self.mu, self.sigma)
 
     def _fix(self):
         return int(round(random.gauss(self.mu, self.sigma)))
 
 
-class RandNumExpo(RandNum):
+class RandNumExpo(_RandNumeral):
     def __init__(self, lambd, base=0):
         self.lambd = lambd
         self.base = base
+
+    def _command_args(self):
+        ret = "lambd=%r" % self.lambd
+        if self.base != 0:
+            ret += ", base=%r" % self.base
+        return ret
 
     def _fix(self):
         return self.base + int(round(random.expovariate(self.lambd)))
@@ -224,7 +266,15 @@ class RandEnum(RandNum):
     """Instances evaluate to integer sampling without replacement from the given interval"""  # noqa: E501
 
     def __init__(self, min, max, seed=None):
+        self._seed = seed
         self.seq = RandomEnumeration(min, max, seed)
+        super(RandEnum, self).__init__(min, max)
+
+    def _command_args(self):
+        ret = "min=%r, max=%r" % (self.min, self.max)
+        if self._seed:
+            ret += ", seed=%r" % self._seed
+        return ret
 
     def _fix(self):
         return next(self.seq)
@@ -315,7 +365,14 @@ class RandEnumKeys(RandEnum):
 
     def __init__(self, enum, seed=None):
         self.enum = list(enum)
-        self.seq = RandomEnumeration(0, len(self.enum) - 1, seed)
+        RandEnum.__init__(self, 0, len(self.enum) - 1, seed)
+
+    def _command_args(self):
+        # Note: only outputs the list of keys, but values are irrelevant anyway
+        ret = "enum=%r" % self.enum
+        if self._seed:
+            ret += ", seed=%r" % self._seed
+        return ret
 
     def _fix(self):
         return self.enum[next(self.seq)]
@@ -325,18 +382,35 @@ class RandChoice(RandField):
     def __init__(self, *args):
         if not args:
             raise TypeError("RandChoice needs at least one choice")
-        self._choice = args
+        self._choice = list(args)
+
+    def _command_args(self):
+        return ", ".join(self._choice)
 
     def _fix(self):
         return random.choice(self._choice)
 
 
 class RandString(RandField):
-    def __init__(self, size=None, chars=b"ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789"):  # noqa: E501
+    _DEFAULT_CHARS = b"ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789"  # noqa: E501
+
+    def __init__(self, size=None, chars=_DEFAULT_CHARS):
         if size is None:
             size = RandNumExpo(0.01)
         self.size = size
         self.chars = chars
+
+    def _command_args(self):
+        ret = ""
+        if isinstance(self.size, VolatileValue):
+            if self.size.lambd != 0.01 or self.size.base != 0:
+                ret += "size=%r" % self.size.command()
+        else:
+            ret += "size=%r" % self.size
+
+        if self.chars != self._DEFAULT_CHARS:
+            ret += ", chars=%r" % self.chars
+        return ret
 
     def _fix(self):
         s = b""
@@ -359,19 +433,41 @@ class RandBin(RandString):
     def __init__(self, size=None):
         super(RandBin, self).__init__(size=size, chars=b"".join(chb(c) for c in range(256)))  # noqa: E501
 
+    def _command_args(self):
+        if not isinstance(self.size, VolatileValue):
+            return "size=%r" % self.size
+
+        if isinstance(self.size, RandNumExpo) and \
+                self.size.lambd == 0.01 and self.size.base == 0:
+            # Default size for RandString, skip
+            return ""
+        return "size=%r" % self.size.command()
+
 
 class RandTermString(RandBin):
     def __init__(self, size, term):
         self.term = bytes_encode(term)
         super(RandTermString, self).__init__(size=size)
 
+    def _command_args(self):
+        return ", ".join((super(RandTermString, self)._command_args(),
+                          "term=%r" % self.term))
+
     def _fix(self):
         return RandBin._fix(self) + self.term
 
 
 class RandIP(RandString):
-    def __init__(self, iptemplate="0.0.0.0/0"):
+    _DEFAULT_IPTEMPLATE = "0.0.0.0/0"
+
+    def __init__(self, iptemplate=_DEFAULT_IPTEMPLATE):
+        RandString.__init__(self)
         self.ip = Net(iptemplate)
+
+    def _command_args(self):
+        if self.ip.repr == self._DEFAULT_IPTEMPLATE:
+            return ""
+        return "iptemplate=%r" % self.ip.repr
 
     def _fix(self):
         return self.ip.choice()
@@ -379,6 +475,8 @@ class RandIP(RandString):
 
 class RandMAC(RandString):
     def __init__(self, template="*"):
+        RandString.__init__(self)
+        self._template = template
         template += ":*:*:*:*:*"
         template = template.split(":")
         self.mac = ()
@@ -392,12 +490,18 @@ class RandMAC(RandString):
                 v = int(template[i], 16)
             self.mac += (v,)
 
+    def _command_args(self):
+        if self._template == "*":
+            return ""
+        return "template=%r" % self._template
+
     def _fix(self):
         return "%02x:%02x:%02x:%02x:%02x:%02x" % self.mac
 
 
 class RandIP6(RandString):
     def __init__(self, ip6template="**"):
+        RandString.__init__(self)
         self.tmpl = ip6template
         self.sp = self.tmpl.split(":")
         for i, v in enumerate(self.sp):
@@ -420,6 +524,11 @@ class RandIP6(RandString):
                 self.sp[i] = RandNum(int(a, 16), int(b, 16))
         self.variable = "" in self.sp
         self.multi = self.sp.count("**")
+
+    def _command_args(self):
+        if self.tmpl == "**":
+            return ""
+        return "ip6template=%r" % self.tmpl
 
     def _fix(self):
         nbm = self.multi
@@ -451,6 +560,7 @@ class RandIP6(RandString):
 
 class RandOID(RandString):
     def __init__(self, fmt=None, depth=RandNumExpo(0.1), idnum=RandNumExpo(0.01)):  # noqa: E501
+        RandString.__init__(self)
         self.ori_fmt = fmt
         if fmt is not None:
             fmt = fmt.split(".")
@@ -460,6 +570,25 @@ class RandOID(RandString):
         self.fmt = fmt
         self.depth = depth
         self.idnum = idnum
+
+    def _command_args(self):
+        ret = []
+        if self.fmt:
+            ret.append("fmt=%r" % self.ori_fmt)
+
+        if not isinstance(self.depth, VolatileValue):
+            ret.append("depth=%r" % self.depth)
+        elif not isinstance(self.depth, RandNumExpo) or \
+                self.depth.lambd != 0.1 or self.depth.base != 0:
+            ret.append("depth=%s" % self.depth.command())
+
+        if not isinstance(self.idnum, VolatileValue):
+            ret.append("idnum=%r" % self.idnum)
+        elif not isinstance(self.idnum, RandNumExpo) or \
+                self.idnum.lambd != 0.01 or self.idnum.base != 0:
+            ret.append("idnum=%s" % self.idnum.command())
+
+        return ", ".join(ret)
 
     def __repr__(self):
         if self.ori_fmt is None:
@@ -489,8 +618,31 @@ class RandRegExp(RandField):
         self._regexp = regexp
         self._lambda = lambda_
 
+    def _command_args(self):
+        ret = "regexp=%r" % self._regexp
+        if self._lambda != 0.3:
+            ret += ", lambda_=%r" % self._lambda
+        return ret
+
+    special_sets = {
+        "[:alnum:]": "[a-zA-Z0-9]",
+        "[:alpha:]": "[a-zA-Z]",
+        "[:ascii:]": "[\x00-\x7F]",
+        "[:blank:]": "[ \t]",
+        "[:cntrl:]": "[\x00-\x1F\x7F]",
+        "[:digit:]": "[0-9]",
+        "[:graph:]": "[\x21-\x7E]",
+        "[:lower:]": "[a-z]",
+        "[:print:]": "[\x20-\x7E]",
+        "[:punct:]": "[!\"\\#$%&'()*+,\\-./:;<=>?@\\[\\\\\\]^_{|}~]",
+        "[:space:]": "[ \t\r\n\v\f]",
+        "[:upper:]": "[A-Z]",
+        "[:word:]": "[A-Za-z0-9_]",
+        "[:xdigit:]": "[A-Fa-f0-9]",
+    }
+
     @staticmethod
-    def choice_expand(s):  # XXX does not support special sets like (ex ':alnum:')  # noqa: E501
+    def choice_expand(s):
         m = ""
         invert = s and s[0] == "^"
         while True:
@@ -556,10 +708,13 @@ class RandRegExp(RandField):
         index = []
         current = stack
         i = 0
-        ln = len(self._regexp)
+        regexp = self._regexp
+        for k, v in self.special_sets.items():
+            regexp = regexp.replace(k, v)
+        ln = len(regexp)
         interp = True
         while i < ln:
-            c = self._regexp[i]
+            c = regexp[i]
             i += 1
 
             if c == '(':
@@ -608,7 +763,7 @@ class RandRegExp(RandField):
                     current.append(e)
                 interp = True
             elif c == '\\':
-                c = self._regexp[i]
+                c = regexp[i]
                 if c == "s":
                     c = RandChoice(" ", "\t")
                 elif c in "0123456789":
@@ -656,6 +811,8 @@ class RandSingNum(RandSingularity):
         return {sign * 2**i for i in range(end_n)}
 
     def __init__(self, mn, mx):
+        self._mn = mn
+        self._mx = mx
         sing = {0, mn, mx, int((mn + mx) / 2)}
         sing |= self.make_power_of_two(mn)
         sing |= self.make_power_of_two(mx)
@@ -665,8 +822,13 @@ class RandSingNum(RandSingularity):
         for i in sing.copy():
             if not mn <= i <= mx:
                 sing.remove(i)
-        self._choice = list(sing)
+        super(RandSingNum, self).__init__(*sing)
         self._choice.sort()
+
+    def _command_args(self):
+        if self.__class__.__name__ == 'RandSingNum':
+            return "mn=%r, mx=%r" % (self._mn, self._mx)
+        return super(RandSingNum, self)._command_args()
 
 
 class RandSingByte(RandSingNum):
@@ -711,7 +873,7 @@ class RandSingSLong(RandSingNum):
 
 class RandSingString(RandSingularity):
     def __init__(self):
-        self._choice = ["",
+        choices_list = ["",
                         "%x",
                         "%%",
                         "%s",
@@ -765,6 +927,10 @@ class RandSingString(RandSingularity):
                         r"\\myserver\share",
                         "foo.exe:",
                         "foo.exe\\", ]
+        super(RandSingString, self).__init__(*choices_list)
+
+    def _command_args(self):
+        return ""
 
     def __str__(self):
         return str(self._fix())
@@ -776,6 +942,7 @@ class RandSingString(RandSingularity):
 class RandPool(RandField):
     def __init__(self, *args):
         """Each parameter is a volatile object or a couple (volatile object, weight)"""  # noqa: E501
+        self._args = args
         pool = []
         for p in args:
             w = 1
@@ -783,6 +950,15 @@ class RandPool(RandField):
                 p, w = p
             pool += [p] * w
         self._pool = pool
+
+    def _command_args(self):
+        ret = []
+        for p in self._args:
+            if isinstance(p, tuple):
+                ret.append("(%s, %r)" % (p[0].command(), p[1]))
+            else:
+                ret.append(p.command())
+        return ", ".join(ret)
 
     def _fix(self):
         r = random.choice(self._pool)
@@ -827,10 +1003,14 @@ class RandUUID(RandField):
 
     def __init__(self, template=None, node=None, clock_seq=None,
                  namespace=None, name=None, version=None):
+        self._template = template
+        self._ori_version = version
+
         self.uuid_template = None
         self.node = None
         self.clock_seq = None
         self.namespace = None
+        self.name = None
         self.node = None
         self.version = None
 
@@ -896,6 +1076,22 @@ class RandUUID(RandField):
                                      "did not specify version, you need to "
                                      "specify it explicitly.")
 
+    def _command_args(self):
+        ret = []
+        if self._template:
+            ret.append("template=%r" % self._template)
+        if self.node:
+            ret.append("node=%r" % self.node)
+        if self.clock_seq:
+            ret.append("clock_seq=%r" % self.clock_seq)
+        if self.namespace:
+            ret.append("namespace=%r" % self.namespace)
+        if self.name:
+            ret.append("name=%r" % self.name)
+        if self._ori_version:
+            ret.append("version=%r" % self._ori_version)
+        return ", ".join(ret)
+
     def _fix(self):
         if self.uuid_template:
             return uuid.UUID(("%08x%04x%04x" + ("%02x" * 8))
@@ -915,12 +1111,25 @@ class RandUUID(RandField):
 # Automatic timestamp
 
 
-class AutoTime(VolatileValue):
-    def __init__(self, base=None):
-        if base is None:
+class AutoTime(_RandNumeral):
+    def __init__(self, base=None, diff=None):
+        self._base = base
+        self._ori_diff = diff
+
+        if diff is not None:
+            self.diff = diff
+        elif base is None:
             self.diff = 0
         else:
             self.diff = time.time() - base
+
+    def _command_args(self):
+        ret = []
+        if self._base:
+            ret.append("base=%r" % self._base)
+        if self._ori_diff:
+            ret.append("diff=%r" % self._ori_diff)
+        return ", ".join(ret)
 
     def _fix(self):
         return time.time() - self.diff
@@ -933,7 +1142,7 @@ class IntAutoTime(AutoTime):
 
 class ZuluTime(AutoTime):
     def __init__(self, diff=0):
-        self.diff = diff
+        super(ZuluTime, self).__init__(diff=diff)
 
     def _fix(self):
         return time.strftime("%y%m%d%H%M%SZ",
@@ -942,7 +1151,7 @@ class ZuluTime(AutoTime):
 
 class GeneralizedTime(AutoTime):
     def __init__(self, diff=0):
-        self.diff = diff
+        super(GeneralizedTime, self).__init__(diff=diff)
 
     def _fix(self):
         return time.strftime("%Y%m%d%H%M%SZ",
@@ -955,6 +1164,9 @@ class DelayedEval(VolatileValue):
     def __init__(self, expr):
         self.expr = expr
 
+    def _command_args(self):
+        return "expr=%r" % self.expr
+
     def _fix(self):
         return eval(self.expr)
 
@@ -964,6 +1176,16 @@ class IncrementalValue(VolatileValue):
         self.start = self.val = start
         self.step = step
         self.restart = restart
+
+    def _command_args(self):
+        ret = []
+        if self.start:
+            ret.append("start=%r" % self.start)
+        if self.step != 1:
+            ret.append("step=%r" % self.step)
+        if self.restart != -1:
+            ret.append("restart=%r" % self.restart)
+        return ", ".join(ret)
 
     def _fix(self):
         v = self.val
@@ -979,6 +1201,15 @@ class CorruptedBytes(VolatileValue):
         self.s = s
         self.p = p
         self.n = n
+
+    def _command_args(self):
+        ret = []
+        ret.append("s=%r" % self.s)
+        if self.p != 0.01:
+            ret.append("p=%r" % self.p)
+        if self.n:
+            ret.append("n=%r" % self.n)
+        return ", ".join(ret)
 
     def _fix(self):
         return corrupt_bytes(self.s, self.p, self.n)

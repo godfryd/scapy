@@ -203,23 +203,32 @@ class PRF(object):
             elif hash_name == "SHA512":
                 self.prf = _tls12_SHA512PRF
             else:
+                if hash_name in ["MD5", "SHA"]:
+                    self.hash_name = "SHA256"
                 self.prf = _tls12_SHA256PRF
         else:
             warning("Unknown TLS version")
 
-    def compute_master_secret(self, pre_master_secret,
-                              client_random, server_random):
+    def compute_master_secret(self, pre_master_secret, client_random,
+                              server_random, extms=False, handshake_hash=None):
         """
         Return the 48-byte master_secret, computed from pre_master_secret,
         client_random and server_random. See RFC 5246, section 6.3.
+        Supports Extended Master Secret Derivation, see RFC 7627
         """
         seed = client_random + server_random
+        label = b'master secret'
+
+        if extms is True and handshake_hash is not None:
+            seed = handshake_hash
+            label = b'extended master secret'
+
         if self.tls_version < 0x0300:
             return None
         elif self.tls_version == 0x0300:
             return self.prf(pre_master_secret, seed, 48)
         else:
-            return self.prf(pre_master_secret, b"master secret", seed, 48)
+            return self.prf(pre_master_secret, label, seed, 48)
 
     def derive_key_block(self, master_secret, server_random,
                          client_random, req_len):
@@ -239,10 +248,12 @@ class PRF(object):
         Return verify_data based on handshake messages, connection end,
         master secret, and read_or_write position. See RFC 5246, section 7.4.9.
 
-        Every TLS 1.2 cipher suite has a verify_data of length 12. Note also:
-        "This PRF with the SHA-256 hash function is used for all cipher
-         suites defined in this document and in TLS documents published
-         prior to this document when TLS 1.2 is negotiated."
+        Every TLS 1.2 cipher suite has a verify_data of length 12. Note also::
+
+            "This PRF with the SHA-256 hash function is used for all cipher
+            suites defined in this document and in TLS documents published
+            prior to this document when TLS 1.2 is negotiated."
+
         Cipher suites using SHA-384 were defined later on.
         """
         if self.tls_version < 0x0300:
@@ -284,10 +295,7 @@ class PRF(object):
                 s2 = _tls_hash_algs["SHA"]().digest(handshake_msg)
                 verify_data = self.prf(master_secret, label, s1 + s2, 12)
             else:
-                if self.hash_name in ["MD5", "SHA"]:
-                    h = _tls_hash_algs["SHA256"]()
-                else:
-                    h = _tls_hash_algs[self.hash_name]()
+                h = _tls_hash_algs[self.hash_name]()
                 s = h.digest(handshake_msg)
                 verify_data = self.prf(master_secret, label, s, 12)
 

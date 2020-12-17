@@ -7,8 +7,6 @@
 Aggregate top level objects from all Scapy modules.
 """
 
-# flake8: noqa: F403
-
 from scapy.base_classes import *
 from scapy.config import *
 from scapy.dadict import *
@@ -16,6 +14,7 @@ from scapy.data import *
 from scapy.error import *
 from scapy.themes import *
 from scapy.arch import *
+from scapy.interfaces import *
 
 from scapy.plist import *
 from scapy.fields import *
@@ -31,7 +30,6 @@ from scapy.supersocket import *
 from scapy.volatile import *
 from scapy.as_resolvers import *
 
-from scapy.ansmachine import *
 from scapy.automaton import *
 from scapy.autorun import *
 
@@ -51,3 +49,5 @@ from scapy.scapypipes import *
 if conf.ipv6_enabled:  # noqa: F405
     from scapy.utils6 import *  # noqa: F401
     from scapy.route6 import *  # noqa: F401
+
+from scapy.ansmachine import *

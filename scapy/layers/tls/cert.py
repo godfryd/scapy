@@ -15,12 +15,14 @@ of a Cert instance after its serial has been modified (for example).
 If you need to modify an import, just use the corresponding ASN1_Packet.
 
 For instance, here is what you could do in order to modify the serial of
-'cert' and then resign it with whatever 'key':
+'cert' and then resign it with whatever 'key'::
+
     f = open('cert.der')
     c = X509_Cert(f.read())
     c.tbsCertificate.serialNumber = 0x4B1D
     k = PrivKey('key.pem')
     new_x509_cert = k.resignCert(c)
+
 No need for obnoxious openssl tweaking anymore. :)
 """
 
@@ -49,7 +51,6 @@ if conf.crypto_valid:
     from cryptography.hazmat.backends import default_backend
     from cryptography.hazmat.primitives import serialization
     from cryptography.hazmat.primitives.asymmetric import rsa, ec
-if conf.crypto_valid_recent:
     from cryptography.hazmat.backends.openssl.ec import InvalidSignature
 
 
@@ -67,7 +68,7 @@ _MAX_CRL_SIZE = 10 * 1024 * 1024   # some are that big
 @conf.commands.register
 def der2pem(der_string, obj="UNKNOWN"):
     """Convert DER octet string to PEM format (with optional header)"""
-    # Encode a byte string in PEM format. Header advertizes <obj> type.
+    # Encode a byte string in PEM format. Header advertises <obj> type.
     pem_string = ("-----BEGIN %s-----\n" % obj).encode()
     base64_string = base64.b64encode(der_string)
     chunks = [base64_string[i:i + 64] for i in range(0, len(base64_string), 64)]  # noqa: E501
@@ -101,7 +102,12 @@ def split_pem(s):
         if start_idx == -1:
             break
         end_idx = s.find(b"-----END")
+        if end_idx == -1:
+            raise Exception("Invalid PEM object (missing END tag)")
         end_idx = s.find(b"\n", end_idx) + 1
+        if end_idx == 0:
+            # There is no final \n
+            end_idx = len(s)
         pem_strings.append(s[start_idx:end_idx])
         s = s[end_idx:]
     return pem_strings
@@ -139,9 +145,8 @@ class _PKIObjMaker(type):
             if _size > obj_max_size:
                 raise Exception(error_msg)
             try:
-                f = open(obj_path, "rb")
-                _raw = f.read()
-                f.close()
+                with open(obj_path, "rb") as f:
+                    _raw = f.read()
             except Exception:
                 raise Exception(error_msg)
         else:
@@ -298,10 +303,11 @@ class PubKeyRSA(PubKey, _EncryptAndVerifyRSA):
 
     def encrypt(self, msg, t="pkcs", h="sha256", mgf=None, L=None):
         # no ECDSA encryption support, hence no ECDSA specific keywords here
-        return _EncryptAndVerifyRSA.encrypt(self, msg, t, h, mgf, L)
+        return _EncryptAndVerifyRSA.encrypt(self, msg, t=t, h=h, mgf=mgf, L=L)
 
     def verify(self, msg, sig, t="pkcs", h="sha256", mgf=None, L=None):
-        return _EncryptAndVerifyRSA.verify(self, msg, sig, t, h, mgf, L)
+        return _EncryptAndVerifyRSA.verify(
+            self, msg, sig, t=t, h=h, mgf=mgf, L=L)
 
 
 class PubKeyECDSA(PubKey):
@@ -328,16 +334,11 @@ class PubKeyECDSA(PubKey):
     @crypto_validator
     def verify(self, msg, sig, h="sha256", **kwargs):
         # 'sig' should be a DER-encoded signature, as per RFC 3279
-        if conf.crypto_valid_recent:
-            try:
-                self.pubkey.verify(sig, msg, ec.ECDSA(_get_hash(h)))
-                return True
-            except InvalidSignature:
-                return False
-        else:
-            verifier = self.pubkey.verifier(sig, ec.ECDSA(_get_hash(h)))
-            verifier.update(msg)
-            return verifier.verify()
+        try:
+            self.pubkey.verify(sig, msg, ec.ECDSA(_get_hash(h)))
+            return True
+        except InvalidSignature:
+            return False
 
 
 ################
@@ -510,10 +511,11 @@ class PrivKeyRSA(PrivKey, _EncryptAndVerifyRSA, _DecryptAndSignRSA):
 
     def verify(self, msg, sig, t="pkcs", h="sha256", mgf=None, L=None):
         # Let's copy this from PubKeyRSA instead of adding another baseclass :)
-        return _EncryptAndVerifyRSA.verify(self, msg, sig, t, h, mgf, L)
+        return _EncryptAndVerifyRSA.verify(
+            self, msg, sig, t=t, h=h, mgf=mgf, L=L)
 
     def sign(self, data, t="pkcs", h="sha256", mgf=None, L=None):
-        return _DecryptAndSignRSA.sign(self, data, t, h, mgf, L)
+        return _DecryptAndSignRSA.sign(self, data, t=t, h=h, mgf=mgf, L=L)
 
 
 class PrivKeyECDSA(PrivKey):
@@ -536,25 +538,15 @@ class PrivKeyECDSA(PrivKey):
     @crypto_validator
     def verify(self, msg, sig, h="sha256", **kwargs):
         # 'sig' should be a DER-encoded signature, as per RFC 3279
-        if conf.crypto_valid_recent:
-            try:
-                self.pubkey.verify(sig, msg, ec.ECDSA(_get_hash(h)))
-                return True
-            except InvalidSignature:
-                return False
-        else:
-            verifier = self.pubkey.verifier(sig, ec.ECDSA(_get_hash(h)))
-            verifier.update(msg)
-            return verifier.verify()
+        try:
+            self.pubkey.verify(sig, msg, ec.ECDSA(_get_hash(h)))
+            return True
+        except InvalidSignature:
+            return False
 
     @crypto_validator
     def sign(self, data, h="sha256", **kwargs):
-        if conf.crypto_valid_recent:
-            return self.key.sign(data, ec.ECDSA(_get_hash(h)))
-        else:
-            signer = self.key.signer(ec.ECDSA(_get_hash(h)))
-            signer.update(data)
-            return signer.finalize()
+        return self.key.sign(data, ec.ECDSA(_get_hash(h)))
 
 
 ################
@@ -668,10 +660,10 @@ class Cert(six.with_metaclass(_CertMaker, object)):
 
     def encrypt(self, msg, t="pkcs", h="sha256", mgf=None, L=None):
         # no ECDSA *encryption* support, hence only RSA specific keywords here
-        return self.pubKey.encrypt(msg, t, h, mgf, L)
+        return self.pubKey.encrypt(msg, t=t, h=h, mgf=mgf, L=L)
 
     def verify(self, msg, sig, t="pkcs", h="sha256", mgf=None, L=None):
-        return self.pubKey.verify(msg, sig, t, h, mgf, L)
+        return self.pubKey.verify(msg, sig, t=t, h=h, mgf=mgf, L=L)
 
     def remainingDays(self, now=None):
         """
@@ -739,12 +731,11 @@ class Cert(six.with_metaclass(_CertMaker, object)):
         """
         Export certificate in 'fmt' format (DER or PEM) to file 'filename'
         """
-        f = open(filename, "wb")
-        if fmt == "DER":
-            f.write(self.der)
-        elif fmt == "PEM":
-            f.write(self.pem)
-        f.close()
+        with open(filename, "wb") as f:
+            if fmt == "DER":
+                f.write(self.der)
+            elif fmt == "PEM":
+                f.write(self.pem)
 
     def show(self):
         print("Serial: %s" % self.serial)
@@ -936,9 +927,8 @@ class Chain(list):
         certificates can be passed (as a file, this time).
         """
         try:
-            f = open(cafile, "rb")
-            ca_certs = f.read()
-            f.close()
+            with open(cafile, "rb") as f:
+                ca_certs = f.read()
         except Exception:
             raise Exception("Could not read from cafile")
 
@@ -947,9 +937,8 @@ class Chain(list):
         untrusted = None
         if untrusted_file:
             try:
-                f = open(untrusted_file, "rb")
-                untrusted_certs = f.read()
-                f.close()
+                with open(untrusted_file, "rb") as f:
+                    untrusted_certs = f.read()
             except Exception:
                 raise Exception("Could not read from untrusted_file")
             untrusted = [Cert(c) for c in split_pem(untrusted_certs)]
@@ -967,16 +956,16 @@ class Chain(list):
         try:
             anchors = []
             for cafile in os.listdir(capath):
-                anchors.append(Cert(open(os.path.join(capath, cafile), "rb").read()))  # noqa: E501
+                with open(os.path.join(capath, cafile), "rb") as fd:
+                    anchors.append(Cert(fd.read()))
         except Exception:
             raise Exception("capath provided is not a valid cert path")
 
         untrusted = None
         if untrusted_file:
             try:
-                f = open(untrusted_file, "rb")
-                untrusted_certs = f.read()
-                f.close()
+                with open(untrusted_file, "rb") as f:
+                    untrusted_certs = f.read()
             except Exception:
                 raise Exception("Could not read from untrusted_file")
             untrusted = [Cert(c) for c in split_pem(untrusted_certs)]
@@ -1001,26 +990,3 @@ class Chain(list):
                 s += "\n"
             idx += 1
         return s
-
-
-##############################
-# Certificate export helpers #
-##############################
-
-def _create_ca_file(anchor_list, filename):
-    """
-    Concatenate all the certificates (PEM format for the export) in
-    'anchor_list' and write the result to file 'filename'. On success
-    'filename' is returned, None otherwise.
-
-    If you are used to OpenSSL tools, this function builds a CAfile
-    that can be used for certificate and CRL check.
-    """
-    try:
-        with open(filename, "w") as f:
-            for a in anchor_list:
-                s = a.output(fmt="PEM")
-                f.write(s)
-    except IOError:
-        return None
-    return filename

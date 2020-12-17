@@ -9,7 +9,8 @@ Welcome to Scapy's documentation!
    :scale: 20
    :align: center
 
-:Release: |version|
+:Version: |version|
+:Release: |release|
 :Date: |today|
 
 This document is under a `Creative Commons Attribution - Non-Commercial 
@@ -24,6 +25,7 @@ This document is under a `Creative Commons Attribution - Non-Commercial
    
    usage
    advanced_usage
+   routing
 
 .. toctree::
    :maxdepth: 2
@@ -47,4 +49,13 @@ This document is under a `Creative Commons Attribution - Non-Commercial
    troubleshooting
    development
    backmatter
+
+.. only:: html
+
+    .. toctree::
+       :maxdepth: 1
+       :titlesonly:
+       :caption: API Reference
+
+       api/scapy.rst
  

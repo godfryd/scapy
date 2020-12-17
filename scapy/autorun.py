@@ -11,9 +11,11 @@ from __future__ import print_function
 import code
 import sys
 import importlib
+import logging
+
 from scapy.config import conf
 from scapy.themes import NoTheme, DefaultTheme, HTMLTheme2, LatexTheme2
-from scapy.error import Scapy_Exception
+from scapy.error import log_scapy, Scapy_Exception
 from scapy.utils import tex_escape
 import scapy.modules.six as six
 
@@ -104,13 +106,37 @@ def autorun_get_interactive_session(cmds, **kargs):
     """Create an interactive session and execute the
     commands passed as "cmds" and return all output
 
-    params:
-      - cmds: a list of commands to run
-    returns: (output, returned)
-
-    The output contains both sys.stdout and sys.stderr logs"""
+    :param cmds: a list of commands to run
+    :returns: (output, returned) contains both sys.stdout and sys.stderr logs
+    """
     sstdout, sstderr = sys.stdout, sys.stderr
     sw = StringWriter()
+    h_old = log_scapy.handlers[0]
+    log_scapy.removeHandler(h_old)
+    log_scapy.addHandler(logging.StreamHandler(stream=sw))
+    try:
+        try:
+            sys.stdout = sys.stderr = sw
+            res = autorun_commands(cmds, **kargs)
+        except StopAutorun as e:
+            e.code_run = sw.s
+            raise
+    finally:
+        sys.stdout, sys.stderr = sstdout, sstderr
+        log_scapy.removeHandler(log_scapy.handlers[0])
+        log_scapy.addHandler(h_old)
+    return sw.s, res
+
+
+def autorun_get_interactive_live_session(cmds, **kargs):
+    """Create an interactive session and execute the
+    commands passed as "cmds" and return all output
+
+    :param cmds: a list of commands to run
+    :returns: (output, returned) contains both sys.stdout and sys.stderr logs
+    """
+    sstdout, sstderr = sys.stdout, sys.stderr
+    sw = StringWriter(debug=sstdout)
     try:
         try:
             sys.stdout = sys.stderr = sw
@@ -128,6 +154,16 @@ def autorun_get_text_interactive_session(cmds, **kargs):
     try:
         conf.color_theme = NoTheme()
         s, res = autorun_get_interactive_session(cmds, **kargs)
+    finally:
+        conf.color_theme = ct
+    return s, res
+
+
+def autorun_get_live_interactive_session(cmds, **kargs):
+    ct = conf.color_theme
+    try:
+        conf.color_theme = DefaultTheme()
+        s, res = autorun_get_interactive_live_session(cmds, **kargs)
     finally:
         conf.color_theme = ct
     return s, res

@@ -2,7 +2,7 @@
 Adding new protocols
 ********************
 
-Adding new protocol (or more correctly: a new *layer*) in Scapy is very easy. All the magic is in the fields. If the 
+Adding a new protocol (or more correctly: a new *layer*) in Scapy is very easy. All the magic is in the fields. If the 
 fields you need are already there and the protocol is not too brain-damaged, 
 this should be a matter of minutes. 
 
@@ -49,7 +49,7 @@ If your protocol is as simple as this, it is ready to use::
     >>> d.donald="cool" 
     >>> raw(d)
     ’\x00\x01\x03\x00\x00\x00\x02’ 
-    >>> Disney( ) 
+    >>> Disney(_) 
     <Disney mickey=1 minnie=0x3 donald=cool |> 
 
 
@@ -880,7 +880,9 @@ Legend:
     XIntField
     
     LongField
+    SignedLongField
     LELongField
+    LESignedLongField
     XLongField
     LELongField
     
@@ -1071,7 +1073,6 @@ TCP/IP
     MACField
     DestMACField(MACField)
     SourceMACField(MACField)
-    ARPSourceMACField(MACField)
     
     ICMPTimeStampField
 
@@ -1095,8 +1096,6 @@ DNS
     DNSRRCountField
     DNSRRField
     DNSQRField
-    RDataField
-    RDLenField
 
 ASN.1
 -----

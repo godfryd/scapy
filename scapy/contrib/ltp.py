@@ -1,5 +1,3 @@
-#!/usr/bin/env python
-
 # This file is part of Scapy
 # Scapy is free software: you can redistribute it and/or modify
 # it under the terms of the GNU General Public License as published by
@@ -15,7 +13,7 @@
 # along with Scapy. If not, see <http://www.gnu.org/licenses/>.
 
 """
- Copyright 2012, The MITRE Corporation
+ Copyright 2012, The MITRE Corporation::
 
                               NOTICE
     This software/technical data was produced for the U.S. Government
@@ -80,12 +78,11 @@ _ltp_payload_conditions = {}
 
 def ltp_bind_payload(cls, lambd):
     """Bind payload class to the LTP packets.
-    params:
-     - cls: the class to bind
-     - lambd: lambda that will be called to check
-              whether or not the cls should be used
 
-              lambda pkt: ...
+    :param cls: the class to bind
+    :param lambd: lambda that will be called to check
+        whether or not the cls should be used
+        ex: lambda pkt: ...
     """
     _ltp_payload_conditions[cls] = lambd
 
@@ -143,8 +140,12 @@ class LTP(Packet):
         #
         ConditionalField(SDNV2("CheckpointSerialNo", 0),
                          lambda x: x.flags in _ltp_checkpoint_segment),
+        #
+        # For segments that are checkpoints or reception reports.
+        #
         ConditionalField(SDNV2("ReportSerialNo", 0),
-                         lambda x: x.flags in _ltp_checkpoint_segment),
+                         lambda x: x.flags in _ltp_checkpoint_segment \
+                         or x.flags == 8),
         #
         # Then comes the actual payload for data carrying segments.
         #
@@ -157,10 +158,9 @@ class LTP(Packet):
         ConditionalField(SDNV2("RA_ReportSerialNo", 0),
                          lambda x: x.flags == 9),
         #
-        # Reception reports have the following fields.
+        # Reception reports have the following fields,
+        # excluding ReportSerialNo defined above.
         #
-        ConditionalField(SDNV2("ReportSerialNo", 0),
-                         lambda x: x.flags == 8),
         ConditionalField(SDNV2("ReportCheckpointSerialNo", 0),
                          lambda x: x.flags == 8),
         ConditionalField(SDNV2("ReportUpperBound", 0),
